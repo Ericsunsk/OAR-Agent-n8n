@@ -1,0 +1,240 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "events": ["im.message.receive_v1"],
+        "options": {}
+      },
+      "type": "n8n-nodes-feishu-lark.larkTrigger",
+      "typeVersion": 2,
+      "position": [-1072, -16],
+      "id": "d42eed33-57ec-4e8c-a707-5c99996f5169",
+      "name": "Lark Trigger",
+      "credentials": {
+        "larkApi": {
+          "id": "OZYoOaN1QpJlcZma",
+          "name": "OKR Agent"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const root = $input.all()[0]?.json ?? {};\nconst event = root.event ?? root;\nconst message = event.message ?? root.message ?? {};\nconst sender = event.sender ?? root.sender ?? {};\nconst senderId = sender.sender_id ?? sender.id ?? {};\nconst senderOpenId = firstString(senderId.open_id, sender.open_id, event.sender_id?.open_id, event.sender_id, root.sender_id?.open_id, root.sender_id);\nconst senderType = firstString(sender.sender_type, sender.type, event.sender_type, root.sender_type) || 'user';\nconst messageType = firstString(message.message_type, event.message_type, root.message_type);\n\nif (senderType !== 'user' || messageType !== 'text') {\n  return [];\n}\n\nfunction asArray(value) {\n  return Array.isArray(value) ? value : [];\n}\n\nfunction firstString(...values) {\n  for (const value of values) {\n    if (value === undefined || value === null) continue;\n    const text = String(value).trim();\n    if (text) return text;\n  }\n  return '';\n}\n\nfunction parseContent(raw) {\n  if (!raw) return { text: '', mentions: [] };\n  if (typeof raw === 'object' && !Array.isArray(raw)) {\n    return {\n      ...raw,\n      text: firstString(raw.text, raw.content),\n      mentions: asArray(raw.mentions),\n    };\n  }\n\n  const text = String(raw).trim();\n  if (!text) return { text: '', mentions: [] };\n\n  try {\n    const parsed = JSON.parse(text);\n    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {\n      return {\n        ...parsed,\n        text: firstString(parsed.text, parsed.content, text),\n        mentions: asArray(parsed.mentions),\n      };\n    }\n  } catch (error) {\n    // Some Lark triggers already provide plain text instead of JSON content.\n  }\n\n  return { text, mentions: [] };\n}\n\nfunction collectStrings(value, output = [], seen = new Set()) {\n  if (value === undefined || value === null) return output;\n  if (typeof value === 'string') {\n    output.push(value);\n    return output;\n  }\n  if (typeof value !== 'object') return output;\n  if (seen.has(value)) return output;\n  seen.add(value);\n  if (Array.isArray(value)) {\n    for (const item of value) collectStrings(item, output, seen);\n    return output;\n  }\n  for (const item of Object.values(value)) collectStrings(item, output, seen);\n  return output;\n}\n\nfunction uniqueMatches(strings, pattern) {\n  const seen = new Set();\n  const matches = [];\n  for (const value of strings) {\n    for (const match of String(value).matchAll(pattern)) {\n      const id = match[0];\n      if (!seen.has(id)) {\n        seen.add(id);\n        matches.push(id);\n      }\n    }\n  }\n  return matches;\n}\n\nfunction firstDifferent(currentId, ...values) {\n  const current = String(currentId || '').trim();\n  for (const value of values) {\n    const text = firstString(value);\n    if (text && text !== current) return text;\n  }\n  return '';\n}\n\nconst content = parseContent(message.content ?? event.content ?? root.content ?? '');\nlet text = firstString(content.text, message.content_text, event.content_text, root.content_text);\nif (!text) {\n  return [];\n}\n\nconst chatType = firstString(message.chat_type, message.chatType, event.chat_type, event.chatType, root.chat_type, root.chatType);\nconst chatId = firstString(message.chat_id, message.chatId, event.chat_id, event.chatId, root.chat_id, root.chatId, message.chat?.id, event.chat?.id, root.chat?.id);\nconst currentMessageId = firstString(message.message_id, message.messageId, event.message_id, event.messageId, root.message_id, root.messageId, message.id, event.id, root.id);\nconst messageId = currentMessageId;\nconst createTime = firstString(message.create_time, message.createTime, message.timestamp, event.create_time, event.createTime, event.timestamp, root.create_time, root.createTime, root.timestamp);\nconst stringsForIds = collectStrings({ root, event, message, content });\nconst omIds = uniqueMatches(stringsForIds, /\\bom_[A-Za-z0-9_-]+\\b/g).filter((id) => id !== currentMessageId);\nconst omtIds = uniqueMatches(stringsForIds, /\\bomt_[A-Za-z0-9_-]+\\b/g);\nconst threadId = firstString(\n  message.thread_id,\n  message.threadId,\n  message.thread?.thread_id,\n  message.thread?.id,\n  event.thread_id,\n  event.threadId,\n  event.thread?.thread_id,\n  event.thread?.id,\n  root.thread_id,\n  root.threadId,\n  root.thread?.thread_id,\n  root.thread?.id,\n  omtIds[0]\n);\nconst rootId = firstDifferent(\n  currentMessageId,\n  message.root_id,\n  message.rootId,\n  message.root?.message_id,\n  message.root?.id,\n  event.root_id,\n  event.rootId,\n  event.root?.message_id,\n  event.root?.id,\n  root.root_id,\n  root.rootId,\n  root.root?.message_id,\n  root.root?.id\n);\nconst parentId = firstDifferent(\n  currentMessageId,\n  message.parent_id,\n  message.parentId,\n  message.parent?.message_id,\n  message.parent?.id,\n  event.parent_id,\n  event.parentId,\n  event.parent?.message_id,\n  event.parent?.id,\n  root.parent_id,\n  root.parentId,\n  root.parent?.message_id,\n  root.parent?.id\n);\nconst referencedMessageId = firstDifferent(\n  currentMessageId,\n  message.referenced_message_id,\n  message.referencedMessageId,\n  message.reference?.message_id,\n  message.reference?.id,\n  message.reply_to?.message_id,\n  message.replyTo?.messageId,\n  message.quote?.message_id,\n  message.quote?.id,\n  event.referenced_message_id,\n  event.referencedMessageId,\n  event.reference?.message_id,\n  event.reference?.id,\n  event.reply_to?.message_id,\n  event.replyTo?.messageId,\n  event.quote?.message_id,\n  event.quote?.id,\n  root.referenced_message_id,\n  root.referencedMessageId,\n  root.reference?.message_id,\n  root.reference?.id,\n  root.reply_to?.message_id,\n  root.replyTo?.messageId,\n  root.quote?.message_id,\n  root.quote?.id,\n  parentId,\n  rootId,\n  omIds[0]\n);\nconst hasReference = Boolean(referencedMessageId || parentId || rootId || threadId);\nconst isDirectChat = chatType === 'p2p';\nconst sessionKey = threadId && chatId\n  ? `oar:chat:${chatId}:thread:${threadId}:user:${senderOpenId}`\n  : (isDirectChat\n    ? `oar:p2p:${senderOpenId}`\n    : `oar:chat:${chatId}:user:${senderOpenId}`);\nconst contextHints = {\n  hasReference,\n  referencedMessageId,\n  threadId,\n  rootId,\n  parentId,\n  currentMessageId,\n  chatId,\n  chatType,\n  createTime,\n};\n\nconst rawMentions = [\n  ...asArray(message.mentions),\n  ...asArray(event.mentions),\n  ...asArray(root.mentions),\n  ...asArray(content.mentions),\n];\nconst mentions = [];\nconst seenMentions = new Set();\n\nfunction mentionIdInfo(mention) {\n  const id = mention?.id ?? {};\n  const openId = id.open_id ?? mention?.open_id ?? mention?.member_id ?? '';\n  const userId = id.user_id ?? mention?.user_id ?? '';\n  const unionId = id.union_id ?? mention?.union_id ?? '';\n  if (openId) return { value: String(openId), type: 'open_id' };\n  if (userId && typeof userId === 'string') return { value: userId, type: 'user_id' };\n  if (unionId) return { value: String(unionId), type: 'union_id' };\n  return { value: '', type: 'open_id' };\n}\n\nfunction mentionName(mention) {\n  return firstString(\n    mention?.name,\n    mention?.display_name,\n    mention?.member_name,\n    mention?.nickname,\n    mention?.name_default,\n    mention?.i18n_name?.zh_cn,\n    mention?.i18n_name?.en_us\n  );\n}\n\nfunction mentionKey(mention) {\n  return firstString(mention?.key, mention?.mention_key, mention?.token);\n}\n\nfor (const mention of rawMentions) {\n  if (!mention || typeof mention !== 'object' || Array.isArray(mention)) continue;\n  const idInfo = mentionIdInfo(mention);\n  const key = [idInfo.type, idInfo.value, mentionName(mention), mentionKey(mention)].join('|');\n  if (seenMentions.has(key)) continue;\n  seenMentions.add(key);\n  mentions.push(mention);\n}\n\nfunction isAssistantMention(mention) {\n  const name = mentionName(mention).toLowerCase();\n  const mentionType = firstString(mention?.type, mention?.member_type, mention?.user_type).toLowerCase();\n  return (\n    name.includes('oar') ||\n    name.includes('okr') ||\n    name.includes('agent') ||\n    name.includes('okr助手') ||\n    mentionType.includes('bot')\n  );\n}\n\nfunction escapeRegExp(value) {\n  return String(value).replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\n}\n\nfunction stripAssistantMentions(source) {\n  let result = source;\n  for (const mention of mentions.filter(isAssistantMention)) {\n    const key = mentionKey(mention);\n    const name = mentionName(mention);\n    if (key) result = result.replace(new RegExp(escapeRegExp(key), 'g'), ' ');\n    if (name) result = result.replace(new RegExp('@?\\\\s*' + escapeRegExp(name), 'ig'), ' ');\n  }\n  return result.replace(/\\s+/g, ' ').trim();\n}\n\nconst commandMatch = text.match(/^\\s*(?:\\/oar|\\/okr|@oar|@okr(?:\\s+agent)?|@okr助手)\\b/i);\nconst hasCommandPrefix = Boolean(commandMatch);\nconst mentionsAssistant = mentions.some(isAssistantMention);\n\nif (!isDirectChat && !mentionsAssistant && !hasCommandPrefix) {\n  return [];\n}\n\nif (mentionsAssistant) {\n  text = stripAssistantMentions(text);\n}\n\nif (hasCommandPrefix) {\n  const strippedText = text.replace(/^\\s*(?:\\/oar|\\/okr|@oar|@okr(?:\\s+agent)?|@okr助手)\\s*/i, '').trim();\n  text = strippedText || (/okr/i.test(commandMatch[0]) ? '查看我的 OKR' : '');\n}\n\nif (!text) {\n  text = '查看我的 OKR';\n}\n\nconst okrDomain = /(okr|目标|关键结果|本期|进度|对齐|复盘|objective|key result|kr)/i.test(text);\nconst wantsOkrRead = okrDomain && /(读|读取|查看|看看|看一下|列出|我的|当前|本期|进度|目标|关键结果|kr|objective|key result)/i.test(text);\nconst wantsBotDialog = /(问|询问|让|请|call|ask).*(机器人|bot)/i.test(text);\nconst targetMentionCandidate = wantsOkrRead ? mentions.find((mention) => !isAssistantMention(mention) && mentionIdInfo(mention).value) : null;\nconst explicitChatId = text.match(/\\boc_[A-Za-z0-9_-]+\\b/)?.[0] || '';\nconst asksGroupScope = /(这个群|本群|群里|群成员|大家|所有人|全部人|每个人|全员|团队|team|group)/i.test(text);\nconst wantsGroupOkrRead = wantsOkrRead && !targetMentionCandidate && (asksGroupScope || Boolean(explicitChatId));\nconst targetMention = wantsOkrRead && !wantsGroupOkrRead ? targetMentionCandidate : null;\nconst targetInfo = targetMention ? mentionIdInfo(targetMention) : { value: senderOpenId, type: 'open_id' };\nconst targetDisplayName = targetMention ? mentionName(targetMention) : '你';\nconst allowedChatId = explicitChatId || (!isDirectChat ? chatId : '');\nconst chatDisplayName = explicitChatId ? '指定群' : (!isDirectChat ? '当前群' : '');\n\nreturn [\n  {\n    json: {\n      text,\n      intent: wantsGroupOkrRead ? 'read_group_okrs' : (wantsOkrRead ? 'read_okr' : (wantsBotDialog ? 'ask_bot' : 'chat')),\n      chatId,\n      chatType,\n      messageId,\n      senderOpenId,\n      sessionKey,\n      contextHints,\n      targetUserId: targetInfo.value,\n      targetUserIdType: targetInfo.type,\n      targetDisplayName: targetDisplayName || '该用户',\n      targetSource: targetMention ? 'mention' : 'self',\n      allowedChatId,\n      chatDisplayName,\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-880, -16],
+      "id": "90645d49-f2f4-4b46-b000-9b1d8c4d40cc",
+      "name": "Prepare incoming message"
+    },
+    {
+      "parameters": {
+        "description": "Unified OKR tool for Feishu OKR operations. Input must be a JSON string. Use action=read_okr with targetUserId, targetUserIdType, targetDisplayName to read one user. Use action=list_chat_members with chatId, chatDisplayName, maxMembers to list group members before reading group OKRs. Only use IDs provided in the current AI input or returned by this tool; never invent user IDs or chat IDs.",
+        "workflowId": {
+          "__rl": true,
+          "value": "YzwZbpxLpOren7HI",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/YzwZbpxLpOren7HI",
+          "cachedResultName": "OAR OKR Tools"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [-432, 384],
+      "id": "690ae1b9-7df0-4930-99ad-bb6c3c09014f",
+      "name": "okr_tools",
+      "rewireOutputLogTo": "ai_tool"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ JSON.stringify({ message: $json.text, intent: $json.intent, requesterOpenId: $json.senderOpenId, sessionKey: $json.sessionKey, contextHints: $json.contextHints, allowedTargetUserId: $json.targetUserId, allowedTargetUserIdType: $json.targetUserIdType, targetDisplayName: $json.targetDisplayName, targetSource: $json.targetSource, allowedChatId: $json.allowedChatId, chatDisplayName: $json.chatDisplayName, chatType: $json.chatType }) }}",
+        "options": {
+          "systemMessage": "你是 OAR，一个在飞书里的 OKR Agent。你的任务是帮助用户查看、理解、改进和跟进 OKR。\n\n你专注于 OKR，不做泛泛闲聊。用户的问题如果和目标、关键结果、进度、复盘、阻塞、协作、对齐关系有关，你要主动进入 OKR 工作模式。\n\n能力边界：\n- 只有当 OKR 工具返回了数据时，你才能说“我看到了/读到了 OKR”。\n- 如果工具没有返回数据、权限不足、目标用户不明确，你必须说明原因，并给出下一步。\n- 不要编造 Objective、Key Result、分数、负责人、进度或公司内部信息。\n- 查看他人 OKR 前，目标用户必须来自明确 @ 提及、明确 open_id，或工具返回的群成员列表。\n- 如果请求涉及隐私或越权，例如“查看某人的 OKR 但未明确授权/未明确身份”，你要拒绝直接读取，并提示用户 @ 对方或提供合规授权方式。\n\n回复风格：\n- 默认使用中文，除非用户用其他语言。\n- 简洁、结构化、可执行。\n- 读 OKR 时优先输出：周期、O 列表、KR 列表、分数/进度、风险点、建议下一步。\n- 如果用户问“帮我分析”，先总结现状，再指出风险，再给 3 条以内建议。\n- 如果信息不足，只问一个最关键的澄清问题。\n\n与其他机器人协作：\n- 只有在用户问题需要外部上下文时，才请求其他机器人。\n- 向其他机器人发送消息时，只传递完成任务所需的最小上下文，不泄露完整 OKR，除非用户明确授权。\n- 其他机器人的回复只能作为参考，你要自己判断、归纳，并说明来源。\n- 当前工作流尚未配置具体机器人 registry；如果用户要求联系某个机器人但没有可用配置，请说明需要配置该机器人的 chat_id、webhook 或调用方式。\n\nOKR 工具使用规则：\n- 你只有一个 OKR 工具：okr_tools。它通过 action 分流。\n- 单人 OKR：调用 okr_tools，参数必须是 JSON 字符串：{\"action\":\"read_okr\",\"targetUserId\":\"<allowedTargetUserId>\",\"targetUserIdType\":\"<allowedTargetUserIdType>\",\"targetDisplayName\":\"<targetDisplayName>\"}。\n- 群成员列表：调用 okr_tools，参数必须是 JSON 字符串：{\"action\":\"list_chat_members\",\"chatId\":\"<allowedChatId>\",\"chatDisplayName\":\"<chatDisplayName>\",\"maxMembers\":20}。\n- 当前默认读取发消息的人；如果用户在群里明确 @ 某人，则读取被 @ 的人。\n- 当输入 JSON 的 intent 为 read_okr，或用户明确要求查看/分析单人 OKR 时，必须先调用 okr_tools(action=read_okr)，再基于工具结果回复。\n- 当输入 JSON 的 intent 为 read_group_okrs，或用户要求查看“这个群/本群/群里所有人/大家/团队”的 OKR 时，先调用 okr_tools(action=list_chat_members)，再对 members 数组中的每个人调用 okr_tools(action=read_okr)，最后做汇总。\n- 一次最多读取 20 人的 OKR；如果工具返回 hasMore=true，回复里要提示本次是部分结果。\n- 禁止自己编造、替换或猜测 targetUserId、chatId。没有 allowedTargetUserId 时，不要读取单人 OKR；没有 allowedChatId 时，不要读取群成员。\n- 如果用户说“所有人”但没有 allowedChatId，也没有明确 oc_ chat_id，不要尝试读取公司全员；请询问是哪个群，或让用户在目标群里发起请求。\n- okr_tools 返回的是工具结果，你需要基于结果做总结、风险识别或下一步建议。\n\n会话上下文规则：\n- 输入 JSON 包含 sessionKey 和 contextHints。contextHints 只代表当前飞书消息可用的 ID 线索。\n- 如果 contextHints.hasReference=true，或用户说“这段/上面/刚才/前面那条”，必须先调用 conversation_context_tools，参数必须是 JSON 字符串：{\"action\":\"resolve_context\",\"contextHints\":<input.contextHints>}，再回答。\n- conversation_context_tools 只用于读取被引用的飞书消息、话题串或近期聊天上下文；只能使用当前输入提供的 referencedMessageId、threadId、rootId、parentId、currentMessageId、chatId 等 ID，不要猜测或补造 ID。\n- Simple Memory 只用于短期连续对话，不是被引用飞书消息的事实来源；需要判断“这段/上面/刚才/前面那条”时，以 conversation_context_tools 返回内容为准。\n- 如果 conversation_context_tools 没有返回可验证内容，不要编造被引用消息内容；请说明无法读取引用内容，并询问用户补充。"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [-640, -16],
+      "id": "d95effeb-3741-4ac7-aa4e-b0d66941dd5e",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-5.5",
+          "mode": "list",
+          "cachedResultName": "gpt-5.5"
+        },
+        "responsesApiEnabled": false,
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [-720, 384],
+      "id": "f5172efd-75b3-45e0-a370-c230d674440a",
+      "name": "OpenAI Chat Model",
+      "credentials": {
+        "openAiApi": {
+          "id": "z3rWW0ZkJmQSuzFt",
+          "name": "Shifang"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "receive_id_type": "chat_id",
+        "receive_id": {
+          "__rl": true,
+          "value": "={{ $node[\"Prepare incoming message\"].json.chatId }}",
+          "mode": "id"
+        },
+        "content": "={{ JSON.stringify({ text: $json.output || \"\" }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-feishu-lark.lark",
+      "typeVersion": 1,
+      "position": [-304, -16],
+      "id": "167d10fb-e7eb-4e14-9872-f7336b16537d",
+      "name": "Send message",
+      "webhookId": "998ec9ff-c06c-4738-a011-f3a316b2c86d",
+      "credentials": {
+        "larkApi": {
+          "id": "OZYoOaN1QpJlcZma",
+          "name": "OKR Agent"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "description": "Reads referenced Lark message, thread, or recent chat context; input must be a JSON string; default action=resolve_context; only use current input-provided IDs.",
+        "workflowId": {
+          "__rl": true,
+          "value": "Ucyq29dR28usv42j",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/Ucyq29dR28usv42j",
+          "cachedResultName": "OAR Conversation Context Tools"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "id": "6a857ae4-fa45-488d-9392-a00a429a8ab2",
+      "name": "conversation_context_tools",
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [-288, 384]
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $json.sessionKey }}",
+        "contextWindowLength": 8
+      },
+      "id": "83dcf7ad-6b11-42dd-9ea9-296872297711",
+      "name": "Simple Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [-560, 384]
+    }
+  ],
+  "connections": {
+    "Lark Trigger": {
+      "main": [
+        [
+          {
+            "node": "Prepare incoming message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare incoming message": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "okr_tools": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Send message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "conversation_context_tools": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "c4b712d1f6444a901a39f3ec4daaac0fc687f9afcf88d30399c29b491d7da3c3"
+  }
+}

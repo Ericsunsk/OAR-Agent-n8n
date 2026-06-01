@@ -1,0 +1,605 @@
+{
+  "name": "OAR OKR Tools",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "2d4c21fd-1909-4c7f-8d8d-62ad4aa89733",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const raw = $input.all()[0]?.json ?? {};\nlet payload = raw.query ?? raw;\nlet parseError = false;\n\nif (typeof payload === \"string\") {\n  try {\n    payload = JSON.parse(payload);\n  } catch (error) {\n    payload = {};\n    parseError = true;\n  }\n}\n\nif (!payload || typeof payload !== \"object\" || Array.isArray(payload)) {\n  payload = {};\n  parseError = true;\n}\n\nlet action = String(payload.action || payload.tool || payload.operation || \"\").trim();\nif (!action) {\n  const hasTargetUser = Boolean(payload.targetUserId || payload.allowedTargetUserId || payload.targetOpenId);\n  action = hasTargetUser ? \"read_okr\" : (payload.chatId || payload.allowedChatId ? \"list_chat_members\" : \"unknown\");\n}\n\nconst aliases = {\n  read: \"read_okr\",\n  get_okr: \"read_okr\",\n  read_user_okr: \"read_okr\",\n  list_members: \"list_chat_members\",\n  list_chat_member: \"list_chat_members\",\n  chat_members: \"list_chat_members\",\n  group_members: \"list_chat_members\",\n};\naction = aliases[action] || action;\n\nconst supportedActions = [\"read_okr\", \"list_chat_members\"];\nconst maxMembersRaw = Number(payload.maxMembers ?? 20);\nconst maxMembers = Number.isFinite(maxMembersRaw) ? Math.min(Math.max(Math.trunc(maxMembersRaw), 1), 20) : 20;\n\nreturn [{\n  json: {\n    action: supportedActions.includes(action) ? action : \"unknown_action\",\n    requestedAction: action,\n    supportedActions,\n    parseError,\n    targetUserId: payload.targetUserId || payload.allowedTargetUserId || payload.targetOpenId || \"\",\n    targetUserIdType: payload.targetUserIdType || payload.allowedTargetUserIdType || \"open_id\",\n    targetDisplayName: payload.targetDisplayName || payload.allowedTargetDisplayName || \"目标用户\",\n    chatId: String(payload.chatId || payload.allowedChatId || \"\").trim(),\n    chatDisplayName: payload.chatDisplayName || \"当前群\",\n    maxMembers,\n    pageSize: maxMembers,\n    pageToken: String(payload.pageToken ?? payload.page_token ?? \"\").trim(),\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "id": "7b4ac09d-b6b6-4e02-8e05-8e5d7bb5573d",
+      "name": "Normalize"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.action }}",
+              "operation": "equal",
+              "value2": "list_chat_members"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        480,
+        -80
+      ],
+      "id": "4649c408-0ae2-4e7e-9d73-f4fcf0cbf57d",
+      "name": "Action is list_chat_members"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ String($json.chatId || '').trim() ? 'present' : '' }}",
+              "operation": "equal",
+              "value2": "present"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        720,
+        -220
+      ],
+      "id": "bd421cbe-1c05-45d9-a158-a791c8f9e001",
+      "name": "Has chatId"
+    },
+    {
+      "parameters": {
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "larkApi",
+        "method": "GET",
+        "url": "={{ 'https://open.feishu.cn/open-apis/im/v1/chats/' + encodeURIComponent($json.chatId) + '/members' }}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "member_id_type",
+              "value": "open_id"
+            },
+            {
+              "name": "page_size",
+              "value": "={{ $json.pageSize || 20 }}"
+            },
+            {
+              "name": "page_token",
+              "value": "={{ $json.pageToken || '' }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        960,
+        -220
+      ],
+      "id": "f2ac0c02-d83d-4244-82ec-93cfa6b368d5",
+      "name": "HTTP list members",
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "larkApi": {
+          "id": "OZYoOaN1QpJlcZma",
+          "name": "OKR Agent"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const input = $input.all()[0]?.json ?? {};\nconst request = $('Normalize').all()[0]?.json ?? {};\n\nfunction asBoolean(value) {\n  if (typeof value === 'boolean') return value;\n  if (typeof value === 'string') return value.toLowerCase() === 'true';\n  return Boolean(value);\n}\n\nfunction finish(output, ok = false, extra = {}, errorCode = 'LIST_CHAT_MEMBERS_FAILED') {\n  const members = Array.isArray(extra.members) ? extra.members : [];\n  const hasMore = asBoolean(extra.hasMore ?? false);\n  const nextPageToken = String(extra.nextPageToken ?? '').trim();\n  return [{\n    json: {\n      ok,\n      action: 'list_chat_members',\n      data: { members, hasMore, nextPageToken },\n      error: ok ? null : { code: errorCode, message: output, retryable: false },\n      meta: {\n        chatId: request.chatId || extra.chatId || '',\n        chatDisplayName: request.chatDisplayName || extra.chatDisplayName || '',\n        maxMembers: request.maxMembers || 20,\n      },\n      members,\n      hasMore,\n      nextPageToken,\n      output,\n      chatMemberToolOk: ok,\n      ...extra,\n    },\n  }];\n}\n\nif (!request.chatId || request.parseError) {\n  return finish('list_chat_members 缺少有效 chatId。请传入 {\"chatId\":\"oc_xxx\"}，或传入 query JSON 字符串。', false, {}, request.parseError ? 'INVALID_TOOL_INPUT' : 'MISSING_CHAT_ID');\n}\n\nif (input.error) {\n  const detail = typeof input.error === 'string' ? input.error : (input.error.message || JSON.stringify(input.error));\n  return finish('读取群成员失败：' + detail, false, {\n    chatId: request.chatId,\n    chatDisplayName: request.chatDisplayName,\n  }, 'LIST_CHAT_MEMBERS_HTTP_ERROR');\n}\n\nif (input.code && input.code !== 0) {\n  return finish('读取群成员失败：' + (input.msg || JSON.stringify(input)), false, {\n    chatId: request.chatId,\n    chatDisplayName: request.chatDisplayName,\n  }, 'LIST_CHAT_MEMBERS_API_ERROR');\n}\n\nconst rawMembers = input.items ?? input.members ?? input.data?.items ?? input.data?.members ?? [];\nconst hasMore = asBoolean(input.has_more ?? input.data?.has_more ?? input.hasMore ?? input.data?.hasMore);\nconst nextPageToken = String(input.page_token ?? input.data?.page_token ?? input.nextPageToken ?? input.data?.nextPageToken ?? '').trim();\n\nif (!Array.isArray(rawMembers) || rawMembers.length === 0) {\n  return finish('没有读取到群成员。请确认机器人在该群内，并且应用已开通 im:chat.members:read 权限。', false, {\n    chatId: request.chatId,\n    chatDisplayName: request.chatDisplayName,\n    hasMore,\n    nextPageToken,\n  }, 'NO_CHAT_MEMBERS');\n}\n\nfunction memberId(member) {\n  const id = member.member_id ?? member.open_id ?? member.user_id ?? member.id?.open_id ?? member.id?.user_id ?? '';\n  return String(id || '').trim();\n}\n\nfunction memberName(member, id) {\n  return String(member.name ?? member.display_name ?? member.member_name ?? member.nickname ?? id).trim();\n}\n\nconst members = [];\nconst seen = new Set();\nfor (const member of rawMembers) {\n  const id = memberId(member);\n  if (!id || seen.has(id)) continue;\n  const type = String(member.member_type ?? member.type ?? '').toLowerCase();\n  if (type.includes('bot')) continue;\n  seen.add(id);\n  members.push({\n    targetUserId: id,\n    targetUserIdType: 'open_id',\n    targetDisplayName: memberName(member, id),\n  });\n  if (members.length >= request.maxMembers) break;\n}\n\nconst lines = [\n  '已读取' + request.chatDisplayName + '成员 ' + members.length + ' 人。',\n  hasMore ? '还有更多成员；下一页请继续传入 pageToken=' + nextPageToken + '。' : '',\n  '接下来请逐个读取 members 数组中的用户 OKR。',\n].filter(Boolean);\n\nreturn finish(lines.join('\\n'), true, {\n  chatId: request.chatId,\n  chatDisplayName: request.chatDisplayName,\n  members,\n  hasMore,\n  nextPageToken,\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        -220
+      ],
+      "id": "bf738f62-6f30-4dde-842b-09b351984b84",
+      "name": "Format result"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.action }}",
+              "operation": "equal",
+              "value2": "read_okr"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        720,
+        220
+      ],
+      "id": "c7462f17-89e2-46b7-93d2-e7eb2ac9f196",
+      "name": "Action is read_okr"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ String($json.targetUserId || '').trim() ? 'present' : '' }}",
+              "operation": "equal",
+              "value2": "present"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        960,
+        220
+      ],
+      "id": "42af4a8c-88bb-44df-9e2b-a4e1412077e5",
+      "name": "Has targetUserId"
+    },
+    {
+      "parameters": {
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "larkApi",
+        "method": "GET",
+        "url": "https://open.feishu.cn/open-apis/okr/v2/cycles",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "user_id",
+              "value": "={{ $('Normalize').all()[0].json.targetUserId }}"
+            },
+            {
+              "name": "user_id_type",
+              "value": "={{ $('Normalize').all()[0].json.targetUserIdType || 'open_id' }}"
+            },
+            {
+              "name": "page_size",
+              "value": "100"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        960,
+        220
+      ],
+      "id": "b01d4a87-b0c0-40cf-a8da-77ef10217f39",
+      "name": "List cycles",
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "larkApi": {
+          "id": "OZYoOaN1QpJlcZma",
+          "name": "OKR Agent"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const input = $input.all()[0]?.json ?? {};\nconst request = $('Normalize').all()[0]?.json ?? {};\nconst targetName = request.targetDisplayName || '目标用户';\nconst targetPossessive = targetName === '你' ? '你的' : targetName + '的';\n\nfunction finish(output, ok = false) {\n  return [{ json: { output, okrToolOk: ok, targetDisplayName: targetName } }];\n}\n\nif (!request.targetUserId || request.parseError) {\n  return finish('read_okr 缺少有效 targetUserId。请传入目标用户 ID。');\n}\n\nif (input.error) {\n  const detail = typeof input.error === 'string' ? input.error : (input.error.message || JSON.stringify(input.error));\n  return finish('读取' + targetPossessive + ' OKR 周期失败：' + detail);\n}\n\nif (input.code && input.code !== 0) {\n  return finish('读取' + targetPossessive + ' OKR 周期失败：' + (input.msg || JSON.stringify(input)));\n}\n\nconst cycles = input.cycles ?? input.items ?? input.data?.cycles ?? input.data?.items ?? [];\nif (!Array.isArray(cycles) || cycles.length === 0) {\n  return finish('没有找到' + targetPossessive + ' OKR 周期。');\n}\n\nfunction asTime(value) {\n  if (!value) return NaN;\n  const raw = String(value).trim();\n  const numeric = Number(raw);\n  if (Number.isFinite(numeric)) return numeric < 1000000000000 ? numeric * 1000 : numeric;\n  return new Date(raw.replace(' ', 'T')).getTime();\n}\n\nconst now = Date.now();\nconst activeStatuses = new Set(['', '0', '1', 'default', 'normal']);\nconst invisibleStatuses = new Set(['2', '3', 'invalid', 'hidden']);\nconst statusValue = (cycle) => String(cycle.cycle_status ?? '').toLowerCase();\nconst currentCycles = cycles.filter((cycle) => {\n  const start = asTime(cycle.start_time);\n  const end = asTime(cycle.end_time);\n  return Number.isFinite(start) && Number.isFinite(end) && start <= now && end >= now && activeStatuses.has(statusValue(cycle));\n});\nconst visibleCycles = cycles.filter((cycle) => !invisibleStatuses.has(statusValue(cycle)));\nconst candidates = currentCycles.length ? currentCycles : (visibleCycles.length ? visibleCycles : cycles);\nconst selected = [...candidates].sort((a, b) => asTime(b.start_time) - asTime(a.start_time))[0];\nconst selectedId = String(selected?.id ?? '').trim();\nif (!selectedId) {\n  return finish('读取' + targetPossessive + ' OKR 周期失败：当前周期缺少 cycleId。');\n}\n\nfunction formatDate(value) {\n  const time = asTime(value);\n  if (!Number.isFinite(time)) return '';\n  return new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(time)).replace(/\\//g, '-');\n}\n\nconst start = formatDate(selected.start_time);\nconst end = formatDate(selected.end_time);\n\nreturn [{\n  json: {\n    cycleId: selectedId,\n    cycleLabel: start && end ? start + ' - ' + end : selectedId,\n    targetUserIdType: request.targetUserIdType || 'open_id',\n    targetDisplayName: targetName,\n    okrToolOk: true,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        220
+      ],
+      "id": "65397f17-51ad-4f25-98de-c3a524ceba8a",
+      "name": "Select cycle"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ String($json.cycleId || '').trim() ? 'present' : '' }}",
+              "operation": "equal",
+              "value2": "present"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1440,
+        220
+      ],
+      "id": "f1d64a51-b7cf-4aef-bf19-42742ac65e67",
+      "name": "Has cycleId"
+    },
+    {
+      "parameters": {
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "larkApi",
+        "method": "GET",
+        "url": "={{ 'https://open.feishu.cn/open-apis/okr/v2/cycles/' + encodeURIComponent($json.cycleId) + '/objectives' }}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "user_id_type",
+              "value": "={{ $json.targetUserIdType || 'open_id' }}"
+            },
+            {
+              "name": "page_size",
+              "value": "100"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1440,
+        220
+      ],
+      "id": "6317055e-bd43-4356-bf9b-94ba7505bdb3",
+      "name": "List objectives",
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "larkApi": {
+          "id": "OZYoOaN1QpJlcZma",
+          "name": "OKR Agent"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const input = $input.all()[0]?.json ?? {};\nconst selected = $('Select cycle').all()[0]?.json ?? {};\n\nif (!selected.okrToolOk) {\n  return [{ json: { ...selected, noObjectives: true } }];\n}\n\nif (input.error) {\n  const detail = typeof input.error === 'string' ? input.error : (input.error.message || JSON.stringify(input.error));\n  return [{ json: { ...selected, noObjectives: true, output: '读取目标列表失败：' + detail } }];\n}\n\nif (input.code && input.code !== 0) {\n  return [{ json: { ...selected, noObjectives: true, output: '读取目标列表失败：' + (input.msg || JSON.stringify(input)) } }];\n}\n\nconst objectives = input.objectives ?? input.items ?? input.data?.objectives ?? input.data?.items ?? [];\nif (!Array.isArray(objectives) || objectives.length === 0) {\n  return [{ json: { ...selected, noObjectives: true, objectives: [] } }];\n}\n\nconst expanded = objectives.map((objective) => ({\n  json: {\n    ...selected,\n    objective,\n    objectiveId: String(objective.id ?? '').trim(),\n    noObjectives: false,\n  },\n}));\n\nif (expanded.some((item) => !item.json.objectiveId)) {\n  return [{ json: { ...selected, noObjectives: true, output: '读取目标列表失败：目标缺少 objectiveId。' } }];\n}\n\nreturn expanded;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        220
+      ],
+      "id": "402d7ca8-f260-47e9-bd17-f597e2f748b2",
+      "name": "Expand objectives"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ String($json.objectiveId || '').trim() ? 'present' : '' }}",
+              "operation": "equal",
+              "value2": "present"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1920,
+        220
+      ],
+      "id": "dd38d178-285b-4ba9-a73f-e045360e10ba",
+      "name": "Has objectiveId"
+    },
+    {
+      "parameters": {
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "larkApi",
+        "method": "GET",
+        "url": "={{ 'https://open.feishu.cn/open-apis/okr/v2/objectives/' + encodeURIComponent($json.objectiveId) + '/key_results' }}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "user_id_type",
+              "value": "={{ $json.targetUserIdType || 'open_id' }}"
+            },
+            {
+              "name": "page_size",
+              "value": "100"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1920,
+        220
+      ],
+      "id": "43009171-c505-46cd-ad17-e7feec57420e",
+      "name": "List key results",
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "larkApi": {
+          "id": "OZYoOaN1QpJlcZma",
+          "name": "OKR Agent"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const krResponses = $input.all();\nconst expanded = $('Expand objectives').all();\nconst firstExpanded = expanded[0]?.json ?? {};\nconst targetName = firstExpanded.targetDisplayName || '目标用户';\nconst targetPossessive = targetName === '你' ? '你的' : targetName + '的';\n\nfunction finish(output, ok = false, extra = {}, errorCode = 'READ_OKR_FAILED') {\n  return [{\n    json: {\n      ok,\n      action: 'read_okr',\n      data: extra.data || {},\n      error: ok ? null : { code: errorCode, message: output, retryable: false },\n      meta: {\n        targetDisplayName: targetName,\n        cycleId: firstExpanded.cycleId || '',\n        cycleLabel: firstExpanded.cycleLabel || '',\n      },\n      output,\n      okrToolOk: ok,\n      targetDisplayName: targetName,\n      cycleLabel: firstExpanded.cycleLabel,\n      ...extra,\n    },\n  }];\n}\n\nif (firstExpanded.output && firstExpanded.noObjectives) {\n  const code = firstExpanded.output.includes('缺少 objectiveId') ? 'MISSING_OBJECTIVE_ID' : 'READ_OKR_OBJECTIVES_FAILED';\n  return finish(firstExpanded.output, false, {}, code);\n}\n\nif (firstExpanded.noObjectives) {\n  return finish('读取结果：' + targetPossessive + ' ' + (firstExpanded.cycleLabel || '当前周期') + ' OKR\\n这个周期下没有目标。', true, { data: { objectives: [] } });\n}\n\nfunction textFromContent(value) {\n  if (!value) return '';\n  if (typeof value === 'string') {\n    const trimmed = value.trim();\n    if (!trimmed) return '';\n    try { return textFromContent(JSON.parse(trimmed)); } catch (error) { return trimmed; }\n  }\n  if (Array.isArray(value)) return value.map(textFromContent).filter(Boolean).join('');\n  if (typeof value === 'object') {\n    if (typeof value.text === 'string') return value.text.trim();\n    if (typeof value.text_run?.text === 'string') return value.text_run.text.trim();\n    if (typeof value.docs_link?.title === 'string') return value.docs_link.title.trim();\n    if (Array.isArray(value.blocks)) return value.blocks.map(textFromContent).filter(Boolean).join('\\n');\n    if (Array.isArray(value.elements)) return value.elements.map(textFromContent).filter(Boolean).join('');\n    if (value.paragraph?.elements) return textFromContent(value.paragraph.elements);\n    if (value.content) return textFromContent(value.content);\n  }\n  return '';\n}\n\nfunction scoreText(score) {\n  const numeric = Number(score);\n  if (!Number.isFinite(numeric)) return '';\n  const percent = numeric <= 1 ? Math.round(numeric * 100) : Math.round(numeric);\n  return '（' + percent + '%）';\n}\n\nfunction objectiveLabel(expandedItem, index) {\n  const objective = expandedItem.json.objective ?? {};\n  const title = textFromContent(objective.content) || '(未命名目标)';\n  return '第 ' + String(index + 1) + ' 个目标 ' + title;\n}\n\nfor (const [index, expandedItem] of expanded.entries()) {\n  const objective = expandedItem.json.objective;\n  if (!objective) continue;\n  const response = krResponses[index]?.json ?? {};\n  const label = objectiveLabel(expandedItem, index);\n  if (response.error) {\n    const detail = typeof response.error === 'string' ? response.error : (response.error.message || JSON.stringify(response.error));\n    const output = '读取' + targetPossessive + ' OKR 失败：' + label + ' 的关键结果读取失败：' + detail;\n    return finish(output, false, { data: { failedObjectiveIndex: index + 1, failedObjectiveId: expandedItem.json.objectiveId || '', failedObjectiveTitle: textFromContent(objective.content) || '(未命名目标)' } }, 'READ_OKR_KEY_RESULTS_HTTP_ERROR');\n  }\n  const hasResponseCode = response.code !== undefined && response.code !== null && response.code !== '';\n  const responseCode = Number(response.code);\n  if (hasResponseCode && (!Number.isFinite(responseCode) || responseCode !== 0)) {\n    const detail = response.msg || JSON.stringify(response);\n    const output = '读取' + targetPossessive + ' OKR 失败：' + label + ' 的关键结果读取失败：' + detail;\n    return finish(output, false, { data: { failedObjectiveIndex: index + 1, failedObjectiveId: expandedItem.json.objectiveId || '', failedObjectiveTitle: textFromContent(objective.content) || '(未命名目标)' } }, 'READ_OKR_KEY_RESULTS_API_ERROR');\n  }\n}\n\nconst lines = ['读取结果：' + targetPossessive + ' ' + (firstExpanded.cycleLabel || '当前周期') + ' OKR'];\nfor (const [index, expandedItem] of expanded.entries()) {\n  const objective = expandedItem.json.objective;\n  if (!objective) continue;\n  lines.push(String(index + 1) + '. O: ' + (textFromContent(objective.content) || '(未命名目标)') + scoreText(objective.score));\n  const response = krResponses[index]?.json ?? {};\n  const keyResults = response.key_results ?? response.items ?? response.data?.key_results ?? response.data?.items ?? [];\n  for (const kr of [...keyResults].sort((a, b) => Number(a.position ?? 0) - Number(b.position ?? 0))) {\n    lines.push('   - KR: ' + (textFromContent(kr.content) || '(未命名关键结果)') + scoreText(kr.score));\n  }\n}\n\nreturn finish(lines.join('\\n'), true, { data: { objectiveCount: expanded.length } });"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        220
+      ],
+      "id": "220eec06-1d4d-42c1-964c-560559315bd4",
+      "name": "Format OKR result"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const input = $input.all()[0]?.json ?? {};\nconst request = $('Normalize').all()[0]?.json ?? {};\nconst targetName = request.targetDisplayName || input.targetDisplayName || '目标用户';\nconst targetPossessive = targetName === '你' ? '你的' : targetName + '的';\n\nlet code = 'MISSING_REQUIRED_FIELD';\nlet message = input.output || '';\n\nif (request.parseError) {\n  code = 'INVALID_TOOL_INPUT';\n  message = 'okr_tools 参数不是有效 JSON。请传入 JSON 字符串。';\n} else if (!request.targetUserId) {\n  code = 'MISSING_TARGET_USER_ID';\n  message = 'read_okr 缺少有效 targetUserId。请传入目标用户 ID。';\n} else if (!input.cycleId) {\n  code = input.output ? 'READ_OKR_CYCLE_FAILED' : 'MISSING_CYCLE_ID';\n  message = input.output || '读取' + targetPossessive + ' OKR 失败：没有可用的 cycleId。';\n} else if (!input.objectiveId) {\n  code = 'MISSING_OBJECTIVE_ID';\n  message = input.output || '读取' + targetPossessive + ' OKR 失败：目标缺少 objectiveId。';\n}\n\nreturn [{\n  json: {\n    ok: false,\n    action: 'read_okr',\n    output: message,\n    error: { code, message, retryable: false },\n    data: {},\n    meta: {\n      targetUserId: request.targetUserId || '',\n      targetUserIdType: request.targetUserIdType || 'open_id',\n      targetDisplayName: targetName,\n      cycleId: input.cycleId || '',\n      objectiveId: input.objectiveId || '',\n    },\n    okrToolOk: false,\n    targetDisplayName: targetName,\n    cycleLabel: input.cycleLabel || '',\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        420
+      ],
+      "id": "e47da0f8-3570-436a-b589-93728cad8945",
+      "name": "Format OKR guard failure"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const input = $input.all()[0]?.json ?? {};\nconst action = input.requestedAction || input.action || \"\";\nconst supported = Array.isArray(input.supportedActions) ? input.supportedActions.join(\", \") : \"read_okr, list_chat_members\";\nconst output = input.parseError\n  ? \"okr_tools 参数不是有效 JSON。请传入 JSON 字符串。\"\n  : \"okr_tools 不支持 action：\" + (action || \"(空)\") + \"。当前支持：\" + supported;\nreturn [{\n  json: {\n    ok: false,\n    action: input.action || \"unknown_action\",\n    output,\n    error: {\n      code: input.parseError ? \"INVALID_TOOL_INPUT\" : \"UNKNOWN_ACTION\",\n      message: output,\n      retryable: false,\n    },\n    data: {},\n    meta: { supportedActions: input.supportedActions || [] },\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        420
+      ],
+      "id": "c1f79d71-9cc7-4201-890f-f5beed4eec9b",
+      "name": "Format unsupported action"
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize": {
+      "main": [
+        [
+          {
+            "node": "Action is list_chat_members",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Action is list_chat_members": {
+      "main": [
+        [
+          {
+            "node": "Has chatId",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Action is read_okr",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has chatId": {
+      "main": [
+        [
+          {
+            "node": "HTTP list members",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP list members": {
+      "main": [
+        [
+          {
+            "node": "Format result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Action is read_okr": {
+      "main": [
+        [
+          {
+            "node": "Has targetUserId",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format unsupported action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has targetUserId": {
+      "main": [
+        [
+          {
+            "node": "List cycles",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format OKR guard failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List cycles": {
+      "main": [
+        [
+          {
+            "node": "Select cycle",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select cycle": {
+      "main": [
+        [
+          {
+            "node": "Has cycleId",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has cycleId": {
+      "main": [
+        [
+          {
+            "node": "List objectives",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format OKR guard failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List objectives": {
+      "main": [
+        [
+          {
+            "node": "Expand objectives",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand objectives": {
+      "main": [
+        [
+          {
+            "node": "Has objectiveId",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has objectiveId": {
+      "main": [
+        [
+          {
+            "node": "List key results",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format OKR result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List key results": {
+      "main": [
+        [
+          {
+            "node": "Format OKR result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "OAR_OKR_TOOLS",
+  "active": false,
+  "pinData": {},
+  "tags": [],
+  "versionId": "okr-tools-v4-two-actions",
+  "meta": {}
+}
