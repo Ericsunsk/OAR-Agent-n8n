@@ -797,36 +797,113 @@ assert(
 );
 
 const prepareCode = codeOf(oar, 'Prepare incoming message');
+
+function prepareOutput(result, label) {
+  const output = result[0]?.json;
+  assert(output, label + ' should produce a routed message');
+  assert(typeof output.intent === 'string' && output.intent, label + ' should retain legacy intent');
+  assert(output.contextHints && typeof output.contextHints === 'object', label + ' should retain contextHints');
+  assert(typeof output.intentHint === 'string' && output.intentHint, label + ' should expose intentHint');
+  assert(
+    ['high', 'medium', 'low'].includes(output.intentConfidence),
+    label + ' should expose intentConfidence as high/medium/low',
+  );
+  assert(
+    output.signals && typeof output.signals === 'object' && !Array.isArray(output.signals),
+    label + ' should expose semantic signals',
+  );
+  assert(
+    output.entities && typeof output.entities === 'object' && !Array.isArray(output.entities),
+    label + ' should expose semantic entities',
+  );
+  return output;
+}
+
+function assertSemanticIntent(output, expected, label) {
+  assert(
+    output.intent === expected || output.intentHint === expected,
+    label + ' should route or hint ' + expected,
+  );
+}
+
+function hasTruthySignal(output, pattern) {
+  return Object.entries(output.signals || {}).some(([key, value]) => pattern.test(key) && value === true);
+}
+
 const analyzeIntent = await run(prepareCode, {
   input: [larkTextEvent('分析我的 OKR 风险')],
 });
+const analyzeSemantic = prepareOutput(analyzeIntent, 'OKR analysis message');
 assert(
-  analyzeIntent[0].json.intent === 'analyze_okr',
-  'prepare should detect analyze_okr intent',
+  analyzeSemantic.signals.okrDomain === true,
+  'OKR analysis message should expose okrDomain signal',
+);
+assert(
+  analyzeSemantic.signals.wantsOkrAnalysis === true || analyzeSemantic.intentHint === 'analyze_okr',
+  'OKR analysis message should expose analysis semantics',
 );
 
 const dispatchIntent = await run(prepareCode, {
   input: [larkTextEvent('请让 research_bot 机器人整理背景', 'om_2')],
 });
+const dispatchSemantic = prepareOutput(dispatchIntent, 'bot dispatch message');
 assert(
-  dispatchIntent[0].json.intent === 'dispatch_bot_task',
-  'prepare should detect dispatch_bot_task intent',
+  dispatchSemantic.signals.wantsBotDispatch === true || dispatchSemantic.intentHint === 'dispatch_bot_task',
+  'bot dispatch message should expose dispatch semantics',
 );
 
 const taskReadIntent = await run(prepareCode, {
   input: [larkTextEvent('查看我的待办任务', 'om_task')],
 });
+const taskReadSemantic = prepareOutput(taskReadIntent, 'task read message');
 assert(
-  taskReadIntent[0].json.intent === 'list_my_tasks',
-  'prepare should detect list_my_tasks intent',
+  taskReadSemantic.intentHint === 'list_my_tasks' || taskReadSemantic.signals.wantsTaskRead === true,
+  'task read message should route or signal list_my_tasks',
+);
+
+const unfinishedTaskReadIntent = await run(prepareCode, {
+  input: [larkTextEvent('看看我有哪些未完成待办', 'om_task_unfinished')],
+});
+const unfinishedTaskReadSemantic = prepareOutput(unfinishedTaskReadIntent, 'unfinished task read message');
+assert(
+  unfinishedTaskReadSemantic.intentHint === 'list_my_tasks' ||
+    unfinishedTaskReadSemantic.signals.wantsTaskRead === true,
+  'unfinished task read message should expose task read semantics',
 );
 
 const okrReadWithMyText = await run(prepareCode, {
   input: [larkTextEvent('读取下我的okr看看', 'om_okr_read')],
 });
+const okrReadWithMyTextSemantic = prepareOutput(okrReadWithMyText, 'explicit OKR read message');
 assert(
-  okrReadWithMyText[0].json.intent === 'read_okr',
-  'prepare should not let broad task wording override explicit OKR reads',
+  okrReadWithMyTextSemantic.signals.okrDomain === true,
+  'explicit OKR read message should expose okrDomain signal',
+);
+assert(
+  okrReadWithMyTextSemantic.signals.wantsTaskRead === false,
+  'explicit OKR read message should not trigger task read signal',
+);
+assertSemanticIntent(okrReadWithMyTextSemantic, 'read_okr', 'explicit OKR read message');
+
+const contextualOkrAnalysisIntent = await run(prepareCode, {
+  input: [larkTextEvent('刚才那条帮我分析下 OKR 风险', 'om_context_okr')],
+});
+const contextualOkrAnalysisSemantic = prepareOutput(
+  contextualOkrAnalysisIntent,
+  'contextual OKR analysis message',
+);
+assert(
+  hasTruthySignal(contextualOkrAnalysisSemantic, /context|reference|recent|previous|引用|上下文/i),
+  'contextual OKR analysis message should expose a context-language signal',
+);
+assert(
+  contextualOkrAnalysisSemantic.signals.okrDomain === true,
+  'contextual OKR analysis message should expose okrDomain signal',
+);
+assert(
+  contextualOkrAnalysisSemantic.signals.wantsOkrAnalysis === true ||
+    contextualOkrAnalysisSemantic.intentHint === 'analyze_okr',
+  'contextual OKR analysis message should expose OKR analysis semantics',
 );
 
 const contactEvent = larkTextEvent('查看张三的通讯录资料', 'om_contact');
@@ -836,40 +913,46 @@ contactEvent.json.event.message.mentions = [
 const contactIntent = await run(prepareCode, {
   input: [contactEvent],
 });
+const contactSemantic = prepareOutput(contactIntent, 'contact read message');
 assert(
-  contactIntent[0].json.intent === 'get_mentioned_users',
-  'prepare should detect contact read intent',
+  contactSemantic.signals.wantsContactRead === true || contactSemantic.intentHint === 'get_mentioned_users',
+  'contact read message should expose contact read semantics',
 );
 assert(
-  contactIntent[0].json.mentionedUsers[0].openId === 'ou_2',
+  contactSemantic.mentionedUsers[0].openId === 'ou_2',
   'prepare should expose mentioned users for contact read guards',
 );
 
 const proposeWriteIntent = await run(prepareCode, {
   input: [larkTextEvent('把我的 OKR 分数改成 80%', 'om_4')],
 });
+const proposeWriteSemantic = prepareOutput(proposeWriteIntent, 'OKR write proposal message');
 assert(
-  proposeWriteIntent[0].json.intent === 'propose_okr_update',
-  'prepare should detect propose_okr_update intent',
+  proposeWriteSemantic.signals.wantsOkrWrite === true || proposeWriteSemantic.intentHint === 'propose_okr_update',
+  'OKR write proposal message should expose write proposal semantics',
 );
 
 const executeWriteIntent = await run(prepareCode, {
   input: [larkTextEvent('确认 ' + proposalId, 'om_5')],
 });
+const executeWriteSemantic = prepareOutput(executeWriteIntent, 'OKR write confirmation message');
 assert(
-  executeWriteIntent[0].json.intent === 'execute_okr_update',
-  'prepare should detect execute_okr_update intent',
+  executeWriteSemantic.intentHint === 'execute_okr_update' ||
+    executeWriteSemantic.intent === 'execute_okr_update',
+  'OKR write confirmation message should route or hint execute_okr_update',
 );
 
 const directChatGroup = await run(prepareCode, {
   input: [larkTextEvent('查看团队 OKR oc_external', 'om_3')],
 });
+const directChatGroupSemantic = prepareOutput(directChatGroup, 'private group OKR read message');
 assert(
-  directChatGroup[0].json.intent === 'read_group_okrs',
-  'prepare should detect group summary intent',
+  directChatGroupSemantic.signals.wantsGroupOkrRead === true ||
+    directChatGroupSemantic.intentHint === 'read_group_okrs',
+  'private group OKR read message should expose group OKR semantics',
 );
 assert(
-  directChatGroup[0].json.allowedChatId === '',
+  directChatGroupSemantic.allowedChatId === '',
   'private chat should not authorize text-provided chat IDs',
 );
 
@@ -916,14 +999,54 @@ console.log(
         mentionedContact: mentionedContact[0].json.contactUserIds[0],
         forgedContact: forgedContact[0].json.error.code,
       },
-      intents: {
-        analyze: analyzeIntent[0].json.intent,
-        dispatch: dispatchIntent[0].json.intent,
-        taskRead: taskReadIntent[0].json.intent,
-        contactRead: contactIntent[0].json.intent,
-        proposeWrite: proposeWriteIntent[0].json.intent,
-        executeWrite: executeWriteIntent[0].json.intent,
-        privateChatAllowedChatId: directChatGroup[0].json.allowedChatId,
+      semantic_routing: {
+        analyze: {
+          intent: analyzeSemantic.intent,
+          intentHint: analyzeSemantic.intentHint,
+          okrDomain: analyzeSemantic.signals.okrDomain,
+          wantsOkrAnalysis: analyzeSemantic.signals.wantsOkrAnalysis,
+        },
+        dispatch: {
+          intent: dispatchSemantic.intent,
+          intentHint: dispatchSemantic.intentHint,
+          wantsBotDispatch: dispatchSemantic.signals.wantsBotDispatch,
+        },
+        taskRead: {
+          intent: taskReadSemantic.intent,
+          intentHint: taskReadSemantic.intentHint,
+          wantsTaskRead: taskReadSemantic.signals.wantsTaskRead,
+        },
+        unfinishedTaskRead: {
+          intent: unfinishedTaskReadSemantic.intent,
+          intentHint: unfinishedTaskReadSemantic.intentHint,
+          wantsTaskRead: unfinishedTaskReadSemantic.signals.wantsTaskRead,
+        },
+        explicitOkrRead: {
+          intent: okrReadWithMyTextSemantic.intent,
+          intentHint: okrReadWithMyTextSemantic.intentHint,
+          okrDomain: okrReadWithMyTextSemantic.signals.okrDomain,
+          wantsTaskRead: okrReadWithMyTextSemantic.signals.wantsTaskRead,
+        },
+        contextualOkrAnalysis: {
+          intent: contextualOkrAnalysisSemantic.intent,
+          intentHint: contextualOkrAnalysisSemantic.intentHint,
+          okrDomain: contextualOkrAnalysisSemantic.signals.okrDomain,
+        },
+        contactRead: {
+          intent: contactSemantic.intent,
+          intentHint: contactSemantic.intentHint,
+          wantsContactRead: contactSemantic.signals.wantsContactRead,
+        },
+        proposeWrite: {
+          intent: proposeWriteSemantic.intent,
+          intentHint: proposeWriteSemantic.intentHint,
+          wantsOkrWrite: proposeWriteSemantic.signals.wantsOkrWrite,
+        },
+        executeWrite: {
+          intent: executeWriteSemantic.intent,
+          intentHint: executeWriteSemantic.intentHint,
+        },
+        privateChatAllowedChatId: directChatGroupSemantic.allowedChatId,
       },
     },
     null,
