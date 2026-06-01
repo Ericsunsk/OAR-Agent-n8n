@@ -3,7 +3,16 @@
   "nodes": [
     {
       "parameters": {
-        "inputSource": "passthrough"
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "query"
+            },
+            {
+              "name": "trustedContextHintsJson"
+            }
+          ]
+        }
       },
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.1,
@@ -17,7 +26,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const raw = $input.all()[0]?.json ?? {};\nlet payload = raw.query ?? raw;\nlet parseError = false;\n\nif (typeof payload === 'string') {\n  try {\n    payload = JSON.parse(payload);\n  } catch (error) {\n    payload = {};\n    parseError = true;\n  }\n}\n\nif (!payload || typeof payload !== 'object' || Array.isArray(payload)) {\n  payload = {};\n  parseError = true;\n}\n\nfunction str(value) {\n  return String(value ?? '').trim();\n}\n\nconst aliases = {\n  resolve: 'resolve_context',\n  context: 'resolve_context',\n  get_context: 'resolve_context',\n  resolveContext: 'resolve_context'\n};\n\nconst requestedAction = str(payload.action ?? payload.tool ?? payload.operation ?? 'resolve_context');\nconst mappedAction = aliases[requestedAction] || requestedAction || 'resolve_context';\nconst action = mappedAction === 'resolve_context' ? 'resolve_context' : 'unknown_action';\n\nconst rawLimit = Number(payload.limit ?? payload.pageSize ?? payload.page_size ?? 10);\nconst limit = Number.isFinite(rawLimit) ? Math.min(Math.max(Math.trunc(rawLimit), 1), 20) : 10;\nconst hints = payload.contextHints && typeof payload.contextHints === \"object\" && !Array.isArray(payload.contextHints)\n  ? payload.contextHints\n  : {};\n\nconst chatId = str(payload.chatId ?? payload.chat_id ?? payload.allowedChatId ?? hints.chatId ?? hints.chat_id);\nconst currentMessageId = str(payload.currentMessageId ?? payload.current_message_id ?? payload.messageId ?? payload.message_id ?? hints.currentMessageId ?? hints.current_message_id);\nconst referencedMessageId = str(payload.referencedMessageId ?? payload.referenced_message_id ?? payload.referenceMessageId ?? payload.replyToMessageId ?? payload.parentMessageId ?? hints.referencedMessageId ?? hints.referenced_message_id ?? hints.parentId ?? hints.parent_id ?? hints.rootId ?? hints.root_id);\nconst threadId = str(payload.threadId ?? payload.thread_id ?? hints.threadId ?? hints.thread_id);\nconst rootId = str(payload.rootId ?? payload.root_id ?? hints.rootId ?? hints.root_id);\nconst parentId = str(payload.parentId ?? payload.parent_id ?? hints.parentId ?? hints.parent_id);\nconst createTime = str(payload.createTime ?? payload.create_time ?? payload.time ?? hints.createTime ?? hints.create_time);\n\nreturn [{\n  json: {\n    action,\n    requestedAction: mappedAction,\n    supportedActions: ['resolve_context'],\n    parseError,\n    limit,\n    chatId,\n    currentMessageId,\n    referencedMessageId,\n    threadId,\n    rootId,\n    parentId,\n    createTime\n  }\n}];"
+        "jsCode": "const raw = $input.all()[0]?.json ?? {};\nlet payload = raw.query ?? {};\nlet parseError = false;\n\nconst rawQueryText = typeof raw.query === 'string' ? raw.query : '';\n\nif (typeof payload === 'string') {\n  try {\n    payload = JSON.parse(payload);\n  } catch (error) {\n    payload = {};\n    parseError = true;\n  }\n}\n\nif (!payload || typeof payload !== 'object' || Array.isArray(payload)) {\n  payload = {};\n  parseError = true;\n}\n\nfunction str(value) {\n  return String(value ?? '').trim();\n}\n\nfunction parseTrustedHints(value) {\n  if (!value) return {};\n  if (typeof value === 'string') {\n    try {\n      const parsed = JSON.parse(value);\n      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};\n    } catch (error) {\n      return {};\n    }\n  }\n  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};\n}\n\nfunction buildUrl(path, query) {\n  const pairs = Object.entries(query).filter(([, value]) => str(value));\n  if (!pairs.length) return 'https://open.feishu.cn/open-apis' + path;\n  const queryString = pairs\n    .map(([key, value]) => encodeURIComponent(key) + '=' + encodeURIComponent(String(value)))\n    .join('&');\n  return 'https://open.feishu.cn/open-apis' + path + '?' + queryString;\n}\n\nfunction normalizedKey(key) {\n  return String(key || '').replace(/[^A-Za-z0-9]/g, '').toLowerCase();\n}\n\nconst forbiddenContextKeys = new Set([\n  'contexthints',\n  'contextids',\n  'contextid',\n  'chatid',\n  'allowedchatid',\n  'containerid',\n  'containeridtype',\n  'threadid',\n  'topicid',\n  'referencedmessageid',\n  'referencemessageid',\n  'replytomessageid',\n  'quotedmessageid',\n  'parentmessageid',\n  'currentmessageid',\n  'messageid',\n  'messageids',\n  'rootid',\n  'parentid'\n]);\nconst contextIdPattern = /\\b(?:oc|om|omt)_[A-Za-z0-9_-]+\\b/;\n\nfunction findForbiddenContextInput(value, path = '') {\n  if (value == null) return '';\n  if (typeof value === 'string') {\n    return contextIdPattern.test(value) ? (path || 'query') : '';\n  }\n  if (typeof value !== 'object') return '';\n  if (Array.isArray(value)) {\n    for (let index = 0; index < value.length; index += 1) {\n      const found = findForbiddenContextInput(value[index], path + '[' + index + ']');\n      if (found) return found;\n    }\n    return '';\n  }\n  for (const [key, nested] of Object.entries(value)) {\n    const nextPath = path ? path + '.' + key : key;\n    if (forbiddenContextKeys.has(normalizedKey(key))) return nextPath;\n    const found = findForbiddenContextInput(nested, nextPath);\n    if (found) return found;\n  }\n  return '';\n}\n\nconst aliases = {\n  resolve: 'resolve_context',\n  context: 'resolve_context',\n  get_context: 'resolve_context',\n  resolveContext: 'resolve_context'\n};\n\nconst requestedAction = str(payload.action ?? payload.tool ?? payload.operation ?? 'resolve_context');\nconst mappedAction = aliases[requestedAction] || requestedAction || 'resolve_context';\nconst directContextInput = findForbiddenContextInput(payload) || (rawQueryText && contextIdPattern.test(rawQueryText) ? 'query' : '');\nconst action = directContextInput ? 'unknown_action' : (mappedAction === 'resolve_context' ? 'resolve_context' : 'unknown_action');\n\nconst rawLimit = Number(payload.limit ?? payload.pageSize ?? payload.page_size ?? 10);\nconst limit = Number.isFinite(rawLimit) ? Math.min(Math.max(Math.trunc(rawLimit), 1), 20) : 10;\nconst hints = parseTrustedHints(raw.trustedContextHintsJson);\n\nconst chatId = str(hints.chatId ?? hints.chat_id);\nconst currentMessageId = str(hints.currentMessageId ?? hints.current_message_id ?? hints.messageId ?? hints.message_id);\nconst referencedMessageId = str(\n  hints.referencedMessageId ??\n  hints.referenced_message_id ??\n  hints.referenceMessageId ??\n  hints.reference_message_id ??\n  hints.replyToMessageId ??\n  hints.reply_to_message_id ??\n  hints.parentMessageId ??\n  hints.parent_message_id ??\n  hints.parentId ??\n  hints.parent_id ??\n  hints.rootId ??\n  hints.root_id\n);\nconst threadId = str(hints.threadId ?? hints.thread_id);\nconst rootId = str(hints.rootId ?? hints.root_id);\nconst parentId = str(hints.parentId ?? hints.parent_id);\nconst createTime = str(hints.createTime ?? hints.create_time ?? hints.time);\n\nlet contextType = 'none';\nlet contextPath = '';\nlet contextQuery = {};\nlet error = null;\n\nif (directContextInput) {\n  error = {\n    code: 'DIRECT_CONTEXT_ID_FORBIDDEN',\n    message: 'conversation_context_tools only accepts context IDs from trustedContextHintsJson; AI query must not include chatId, referencedMessageId, threadId, contextHints, or aliases.',\n    retryable: false,\n    field: directContextInput\n  };\n} else if (referencedMessageId) {\n  contextType = 'reference';\n  contextPath = '/im/v1/messages/mget';\n  contextQuery = {\n    message_ids: referencedMessageId\n  };\n} else if (threadId) {\n  contextType = 'thread';\n  contextPath = '/im/v1/messages';\n  contextQuery = {\n    container_id_type: 'thread',\n    container_id: threadId,\n    sort_type: 'ByCreateTimeAsc',\n    page_size: limit\n  };\n} else if (chatId) {\n  contextType = 'recent_chat';\n  contextPath = '/im/v1/messages';\n  contextQuery = {\n    container_id_type: 'chat',\n    container_id: chatId,\n    sort_type: 'ByCreateTimeDesc',\n    page_size: limit\n  };\n}\n\nconst contextUrl = error || !contextPath ? '' : buildUrl(contextPath, contextQuery);\n\nreturn [{\n  json: {\n    action,\n    requestedAction: mappedAction,\n    supportedActions: ['resolve_context'],\n    parseError,\n    limit,\n    chatId,\n    currentMessageId,\n    referencedMessageId,\n    threadId,\n    rootId,\n    parentId,\n    createTime,\n    contextType,\n    contextUrl,\n    contextQuery,\n    error\n  }\n}];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -54,7 +63,7 @@
         "conditions": {
           "string": [
             {
-              "value1": "={{ $json.referencedMessageId ? 'yes' : 'no' }}",
+              "value1": "={{ $json.contextType !== 'none' ? 'yes' : 'no' }}",
               "operation": "equal",
               "value2": "yes"
             }
@@ -65,36 +74,27 @@
       "typeVersion": 1,
       "position": [
         720,
-        -120
+        -80
       ],
       "id": "22642909-b892-4be0-99a0-c865329a2ad0",
-      "name": "Has referencedMessageId"
+      "name": "Has context target"
     },
     {
       "parameters": {
         "authentication": "predefinedCredentialType",
         "nodeCredentialType": "larkApi",
         "method": "GET",
-        "url": "https://open.feishu.cn/open-apis/im/v1/messages/mget",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            {
-              "name": "message_ids",
-              "value": "={{ $('Normalize').all()[0].json.referencedMessageId }}"
-            }
-          ]
-        },
+        "url": "={{ $('Normalize').all()[0].json.contextUrl }}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
         960,
-        -220
+        -80
       ],
       "id": "eec88cd5-c969-4958-92b4-0daf9706d621",
-      "name": "HTTP get referenced message",
+      "name": "HTTP get context",
       "onError": "continueRegularOutput",
       "credentials": {
         "larkApi": {
@@ -106,167 +106,21 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const input = $input.all()[0]?.json ?? {};\nconst request = $('Normalize').all()[0]?.json ?? {};\n\nfunction asBoolean(value) {\n  if (typeof value === 'boolean') return value;\n  if (typeof value === 'string') return value.toLowerCase() === 'true';\n  return Boolean(value);\n}\n\nfunction parseContent(value) {\n  if (typeof value !== 'string') return value;\n  const trimmed = value.trim();\n  if (!trimmed) return '';\n  try {\n    return JSON.parse(trimmed);\n  } catch (error) {\n    return trimmed;\n  }\n}\n\nfunction extractText(value) {\n  if (value == null) return '';\n  if (typeof value === 'string') return value.trim();\n  if (Array.isArray(value)) return value.map(extractText).filter(Boolean).join(' ');\n  if (typeof value !== 'object') return '';\n\n  if (typeof value.text === 'string') return value.text.trim();\n  if (typeof value.title === 'string' && Array.isArray(value.content)) {\n    const body = extractText(value.content);\n    return (value.title + (body ? ' ' + body : '')).trim();\n  }\n  if (Array.isArray(value.content)) return extractText(value.content);\n  if (value.zh_cn) return extractText(value.zh_cn);\n  if (value.en_us) return extractText(value.en_us);\n  if (Array.isArray(value.elements)) return extractText(value.elements);\n  if (Array.isArray(value.blocks)) return extractText(value.blocks);\n  if (typeof value.user_name === 'string') return '@' + value.user_name.trim();\n  if (typeof value.tag === 'string') {\n    const tag = value.tag.toLowerCase();\n    if (tag === 'img' || tag === 'image') return '[image]';\n    if (tag === 'file') return '[file]';\n    if (tag === 'audio') return '[audio]';\n    if (tag === 'media' || tag === 'video') return '[video]';\n    if (tag === 'emotion') return '[emoji]';\n    if (tag === 'at' && typeof value.user_name === 'string') return '@' + value.user_name.trim();\n  }\n  if (typeof value.content === 'string') return extractText(parseContent(value.content));\n\n  return '';\n}\n\nfunction messageText(message) {\n  const rawContent = message.body?.content ?? message.content ?? '';\n  const parsed = parseContent(rawContent);\n  const text = extractText(parsed) || extractText(message.body) || extractText(message.content);\n  if (text) return text;\n  const msgType = String(message.msg_type ?? message.msgType ?? '').toLowerCase();\n  return msgType ? '[' + msgType + ']' : '[non-text message]';\n}\n\nfunction normalizeMessages(messages) {\n  if (!Array.isArray(messages)) return [];\n  return messages.map((message) => {\n    const senderId = String(\n      message.sender?.id ??\n      message.sender?.sender_id ??\n      message.sender?.open_id ??\n      message.sender_id ??\n      ''\n    ).trim();\n    const senderName = String(\n      message.sender?.name ??\n      message.sender?.sender_name ??\n      message.sender_name ??\n      senderId\n    ).trim();\n\n    return {\n      messageId: String(message.message_id ?? message.messageId ?? '').trim(),\n      senderName,\n      senderId,\n      createTime: String(message.create_time ?? message.createTime ?? '').trim(),\n      msgType: String(message.msg_type ?? message.msgType ?? '').trim(),\n      text: messageText(message)\n    };\n  }).filter((message) => message.messageId).slice(0, request.limit);\n}\n\nfunction buildOutput(prefix, messages) {\n  if (!messages.length) return prefix + ': no messages found.';\n  const lines = messages.map((message, index) => {\n    return String(index + 1) + '. ' + (message.senderName || message.senderId || 'Unknown') + ': ' + (message.text || '[non-text message]');\n  });\n  return [prefix, ...lines].join(String.fromCharCode(10));\n}\n\nfunction inferContextType() {\n  if (request.referencedMessageId) return 'reference';\n  if (request.threadId) return 'thread';\n  return 'recent_chat';\n}\n\nconst contextType = inferContextType();\nconst config = {\n  reference: {\n    fetchLabel: 'referenced message',\n    fetchCode: 'REFERENCE_FETCH_FAILED',\n    notFoundCode: 'REFERENCE_NOT_FOUND',\n    notFoundOutput: 'Referenced message not found or inaccessible.',\n    notFoundMessage: 'No readable referenced message returned.',\n    successPrefix: 'Resolved reference context',\n    neverTruncated: true\n  },\n  thread: {\n    fetchLabel: 'thread messages',\n    fetchCode: 'THREAD_FETCH_FAILED',\n    notFoundCode: 'THREAD_NOT_FOUND',\n    notFoundOutput: 'Thread messages not found or inaccessible.',\n    notFoundMessage: 'No readable thread messages returned.',\n    successPrefix: 'Resolved thread context',\n    neverTruncated: false\n  },\n  recent_chat: {\n    fetchLabel: 'recent chat messages',\n    fetchCode: 'CHAT_FETCH_FAILED',\n    notFoundCode: 'CHAT_NOT_FOUND',\n    notFoundOutput: 'Recent chat messages not found or inaccessible.',\n    notFoundMessage: 'No readable recent chat messages returned.',\n    successPrefix: 'Resolved recent chat context',\n    neverTruncated: false\n  }\n}[contextType];\n\nfunction finish({ ok, messages, output, error, truncated }) {\n  return [{\n    json: {\n      ok,\n      action: 'resolve_context',\n      contextType: ok ? contextType : 'none',\n      output,\n      messages,\n      limits: {\n        limit: request.limit,\n        truncated\n      },\n      error,\n      meta: {\n        chatId: request.chatId,\n        currentMessageId: request.currentMessageId,\n        referencedMessageId: request.referencedMessageId,\n        threadId: request.threadId,\n        rootId: request.rootId,\n        parentId: request.parentId\n      }\n    }\n  }];\n}\n\nif (input.error) {\n  const detail = typeof input.error === 'string' ? input.error : (input.error.message || JSON.stringify(input.error));\n  return finish({\n    ok: false,\n    messages: [],\n    output: 'Failed to fetch ' + config.fetchLabel + ': ' + detail,\n    truncated: false,\n    error: {\n      code: config.fetchCode,\n      message: detail,\n      retryable: true\n    }\n  });\n}\n\nif (input.code && input.code !== 0) {\n  const detail = input.msg || JSON.stringify(input);\n  return finish({\n    ok: false,\n    messages: [],\n    output: 'Failed to fetch ' + config.fetchLabel + ': ' + detail,\n    truncated: false,\n    error: {\n      code: config.fetchCode,\n      message: String(input.msg || 'request failed'),\n      retryable: true\n    }\n  });\n}\n\nconst rawMessages = input.messages ?? input.items ?? input.data?.messages ?? input.data?.items ?? [];\nconst messages = normalizeMessages(rawMessages);\nconst hasMore = asBoolean(input.has_more ?? input.data?.has_more ?? input.hasMore ?? input.data?.hasMore);\nconst truncated = config.neverTruncated ? false : (hasMore || (Array.isArray(rawMessages) && rawMessages.length > request.limit));\n\nif (!messages.length) {\n  return finish({\n    ok: false,\n    messages: [],\n    output: config.notFoundOutput,\n    truncated: false,\n    error: {\n      code: config.notFoundCode,\n      message: config.notFoundMessage,\n      retryable: false\n    }\n  });\n}\n\nreturn finish({\n  ok: true,\n  messages,\n  output: buildOutput(config.successPrefix, messages),\n  truncated,\n  error: null\n});"
+        "jsCode": "const input = $input.all()[0]?.json ?? {};\nconst request = $('Normalize').all()[0]?.json ?? {};\n\nfunction asBoolean(value) {\n  if (typeof value === 'boolean') return value;\n  if (typeof value === 'string') return value.toLowerCase() === 'true';\n  return Boolean(value);\n}\n\nfunction parseContent(value) {\n  if (typeof value !== 'string') return value;\n  const trimmed = value.trim();\n  if (!trimmed) return '';\n  try {\n    return JSON.parse(trimmed);\n  } catch (error) {\n    return trimmed;\n  }\n}\n\nfunction extractText(value) {\n  if (value == null) return '';\n  if (typeof value === 'string') return value.trim();\n  if (Array.isArray(value)) return value.map(extractText).filter(Boolean).join(' ');\n  if (typeof value !== 'object') return '';\n\n  if (typeof value.text === 'string') return value.text.trim();\n  if (typeof value.title === 'string' && Array.isArray(value.content)) {\n    const body = extractText(value.content);\n    return (value.title + (body ? ' ' + body : '')).trim();\n  }\n  if (Array.isArray(value.content)) return extractText(value.content);\n  if (value.zh_cn) return extractText(value.zh_cn);\n  if (value.en_us) return extractText(value.en_us);\n  if (Array.isArray(value.elements)) return extractText(value.elements);\n  if (Array.isArray(value.blocks)) return extractText(value.blocks);\n  if (typeof value.user_name === 'string') return '@' + value.user_name.trim();\n  if (typeof value.tag === 'string') {\n    const tag = value.tag.toLowerCase();\n    if (tag === 'img' || tag === 'image') return '[image]';\n    if (tag === 'file') return '[file]';\n    if (tag === 'audio') return '[audio]';\n    if (tag === 'media' || tag === 'video') return '[video]';\n    if (tag === 'emotion') return '[emoji]';\n    if (tag === 'at' && typeof value.user_name === 'string') return '@' + value.user_name.trim();\n  }\n  if (typeof value.content === 'string') return extractText(parseContent(value.content));\n\n  return '';\n}\n\nfunction messageText(message) {\n  const rawContent = message.body?.content ?? message.content ?? '';\n  const parsed = parseContent(rawContent);\n  const text = extractText(parsed) || extractText(message.body) || extractText(message.content);\n  if (text) return text;\n  const msgType = String(message.msg_type ?? message.msgType ?? '').toLowerCase();\n  return msgType ? '[' + msgType + ']' : '[non-text message]';\n}\n\nfunction normalizeMessages(messages) {\n  if (!Array.isArray(messages)) return [];\n  return messages.map((message) => {\n    const senderId = String(\n      message.sender?.id ??\n      message.sender?.sender_id ??\n      message.sender?.open_id ??\n      message.sender_id ??\n      ''\n    ).trim();\n    const senderName = String(\n      message.sender?.name ??\n      message.sender?.sender_name ??\n      message.sender_name ??\n      senderId\n    ).trim();\n\n    return {\n      messageId: String(message.message_id ?? message.messageId ?? '').trim(),\n      senderName,\n      senderId,\n      createTime: String(message.create_time ?? message.createTime ?? '').trim(),\n      msgType: String(message.msg_type ?? message.msgType ?? '').trim(),\n      text: messageText(message)\n    };\n  }).filter((message) => message.messageId).slice(0, request.limit);\n}\n\nfunction buildOutput(prefix, messages) {\n  if (!messages.length) return prefix + ': no messages found.';\n  const lines = messages.map((message, index) => {\n    return String(index + 1) + '. ' + (message.senderName || message.senderId || 'Unknown') + ': ' + (message.text || '[non-text message]');\n  });\n  return [prefix, ...lines].join(String.fromCharCode(10));\n}\n\nconst contextType = request.contextType || 'none';\nconst missingIdentifiersMessage = 'resolve_context needs referencedMessageId, threadId, or chatId.';\nconst config = {\n  reference: {\n    fetchLabel: 'referenced message',\n    fetchCode: 'REFERENCE_FETCH_FAILED',\n    notFoundCode: 'REFERENCE_NOT_FOUND',\n    notFoundOutput: 'Referenced message not found or inaccessible.',\n    notFoundMessage: 'No readable referenced message returned.',\n    successPrefix: 'Resolved reference context',\n    neverTruncated: true\n  },\n  thread: {\n    fetchLabel: 'thread messages',\n    fetchCode: 'THREAD_FETCH_FAILED',\n    notFoundCode: 'THREAD_NOT_FOUND',\n    notFoundOutput: 'Thread messages not found or inaccessible.',\n    notFoundMessage: 'No readable thread messages returned.',\n    successPrefix: 'Resolved thread context',\n    neverTruncated: false\n  },\n  recent_chat: {\n    fetchLabel: 'recent chat messages',\n    fetchCode: 'CHAT_FETCH_FAILED',\n    notFoundCode: 'CHAT_NOT_FOUND',\n    notFoundOutput: 'Recent chat messages not found or inaccessible.',\n    notFoundMessage: 'No readable recent chat messages returned.',\n    successPrefix: 'Resolved recent chat context',\n    neverTruncated: false\n  }\n}[contextType];\n\nfunction finish({ ok, messages, output, error, truncated }) {\n  return [{\n    json: {\n      ok,\n      action: 'resolve_context',\n      contextType: ok ? contextType : 'none',\n      output,\n      messages,\n      limits: {\n        limit: request.limit,\n        truncated\n      },\n      error,\n      meta: {\n        chatId: request.chatId,\n        currentMessageId: request.currentMessageId,\n        referencedMessageId: request.referencedMessageId,\n        threadId: request.threadId,\n        rootId: request.rootId,\n        parentId: request.parentId\n      }\n    }\n  }];\n}\n\nif (!config || contextType === 'none' || !request.contextUrl) {\n  return finish({\n    ok: false,\n    messages: [],\n    output: missingIdentifiersMessage,\n    truncated: false,\n    error: {\n      code: 'MISSING_CONTEXT_IDENTIFIERS',\n      message: missingIdentifiersMessage,\n      retryable: false\n    }\n  });\n}\n\nif (input.error) {\n  const detail = typeof input.error === 'string' ? input.error : (input.error.message || JSON.stringify(input.error));\n  return finish({\n    ok: false,\n    messages: [],\n    output: 'Failed to fetch ' + config.fetchLabel + ': ' + detail,\n    truncated: false,\n    error: {\n      code: config.fetchCode,\n      message: detail,\n      retryable: true\n    }\n  });\n}\n\nif (input.code && input.code !== 0) {\n  const detail = input.msg || JSON.stringify(input);\n  return finish({\n    ok: false,\n    messages: [],\n    output: 'Failed to fetch ' + config.fetchLabel + ': ' + detail,\n    truncated: false,\n    error: {\n      code: config.fetchCode,\n      message: String(input.msg || 'request failed'),\n      retryable: true\n    }\n  });\n}\n\nconst rawMessages = input.messages ?? input.items ?? input.data?.messages ?? input.data?.items ?? [];\nconst messages = normalizeMessages(rawMessages);\nconst hasMore = asBoolean(input.has_more ?? input.data?.has_more ?? input.hasMore ?? input.data?.hasMore);\nconst truncated = config.neverTruncated ? false : (hasMore || (Array.isArray(rawMessages) && rawMessages.length > request.limit));\n\nif (!messages.length) {\n  return finish({\n    ok: false,\n    messages: [],\n    output: config.notFoundOutput,\n    truncated: false,\n    error: {\n      code: config.notFoundCode,\n      message: config.notFoundMessage,\n      retryable: false\n    }\n  });\n}\n\nreturn finish({\n  ok: true,\n  messages,\n  output: buildOutput(config.successPrefix, messages),\n  truncated,\n  error: null\n});"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1680,
-        -20
+        1440,
+        -80
       ],
       "id": "7493fccd-d898-4a95-8da9-c6baf3baf6cf",
       "name": "Format context result"
     },
     {
       "parameters": {
-        "conditions": {
-          "string": [
-            {
-              "value1": "={{ $json.threadId ? 'yes' : 'no' }}",
-              "operation": "equal",
-              "value2": "yes"
-            }
-          ]
-        }
-      },
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 1,
-      "position": [
-        960,
-        20
-      ],
-      "id": "a6475dfe-290a-4695-a4f5-cb324d2b9ffc",
-      "name": "Has threadId"
-    },
-    {
-      "parameters": {
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "larkApi",
-        "method": "GET",
-        "url": "https://open.feishu.cn/open-apis/im/v1/messages",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            {
-              "name": "container_id_type",
-              "value": "thread"
-            },
-            {
-              "name": "container_id",
-              "value": "={{ $('Normalize').all()[0].json.threadId }}"
-            },
-            {
-              "name": "sort_type",
-              "value": "ByCreateTimeAsc"
-            },
-            {
-              "name": "page_size",
-              "value": "={{ $('Normalize').all()[0].json.limit }}"
-            }
-          ]
-        },
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.3,
-      "position": [
-        1200,
-        -20
-      ],
-      "id": "b5cae7f2-c6a4-4529-aec5-78f93f2fbf54",
-      "name": "HTTP get thread messages",
-      "onError": "continueRegularOutput",
-      "credentials": {
-        "larkApi": {
-          "id": "OZYoOaN1QpJlcZma",
-          "name": "OKR Agent"
-        }
-      }
-    },
-    {
-      "parameters": {
-        "conditions": {
-          "string": [
-            {
-              "value1": "={{ $json.chatId ? 'yes' : 'no' }}",
-              "operation": "equal",
-              "value2": "yes"
-            }
-          ]
-        }
-      },
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 1,
-      "position": [
-        1200,
-        220
-      ],
-      "id": "8f2eb3cd-f8ec-45ef-b9dd-c27ea40b9327",
-      "name": "Has chatId"
-    },
-    {
-      "parameters": {
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "larkApi",
-        "method": "GET",
-        "url": "https://open.feishu.cn/open-apis/im/v1/messages",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            {
-              "name": "container_id_type",
-              "value": "chat"
-            },
-            {
-              "name": "container_id",
-              "value": "={{ $('Normalize').all()[0].json.chatId }}"
-            },
-            {
-              "name": "sort_type",
-              "value": "ByCreateTimeDesc"
-            },
-            {
-              "name": "page_size",
-              "value": "={{ $('Normalize').all()[0].json.limit }}"
-            }
-          ]
-        },
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.3,
-      "position": [
-        1440,
-        180
-      ],
-      "id": "f5f5e020-8f3f-4ef0-ad4f-55f9e22a1763",
-      "name": "HTTP get recent chat messages",
-      "onError": "continueRegularOutput",
-      "credentials": {
-        "larkApi": {
-          "id": "OZYoOaN1QpJlcZma",
-          "name": "OKR Agent"
-        }
-      }
-    },
-    {
-      "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const request = $('Normalize').all()[0]?.json ?? {};\nconst message = 'resolve_context needs referencedMessageId, threadId, or chatId.';\n\nreturn [{\n  json: {\n    ok: false,\n    action: 'resolve_context',\n    contextType: 'none',\n    output: message,\n    messages: [],\n    limits: {\n      limit: request.limit,\n      truncated: false\n    },\n    error: {\n      code: 'MISSING_CONTEXT_IDENTIFIERS',\n      message,\n      retryable: false\n    },\n    meta: {\n      chatId: request.chatId,\n      currentMessageId: request.currentMessageId,\n      referencedMessageId: request.referencedMessageId,\n      threadId: request.threadId,\n      rootId: request.rootId,\n      parentId: request.parentId\n    }\n  }\n}];"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1440,
-        360
-      ],
-      "id": "4f23930d-40dc-472a-b7f2-c845e4a10f47",
-      "name": "Format missing identifiers"
-    },
-    {
-      "parameters": {
-        "mode": "runOnceForAllItems",
-        "jsCode": "const request = $input.all()[0]?.json ?? {};\nconst output = request.parseError\n  ? 'conversation_context_tools received invalid JSON input.'\n  : 'conversation_context_tools does not support action: ' + (request.requestedAction || '(empty)') + '. Supported action: resolve_context.';\n\nreturn [{\n  json: {\n    ok: false,\n    action: request.action || 'unknown_action',\n    contextType: 'none',\n    output,\n    messages: [],\n    limits: {\n      limit: request.limit || 10,\n      truncated: false\n    },\n    error: {\n      code: request.parseError ? 'INVALID_TOOL_INPUT' : 'UNSUPPORTED_ACTION',\n      message: output,\n      retryable: false\n    },\n    meta: {\n      chatId: request.chatId || '',\n      currentMessageId: request.currentMessageId || '',\n      referencedMessageId: request.referencedMessageId || '',\n      threadId: request.threadId || '',\n      rootId: request.rootId || '',\n      parentId: request.parentId || ''\n    }\n  }\n}];"
+        "jsCode": "const request = $input.all()[0]?.json ?? {};\nconst output = request.error\n  ? request.error.message\n  : (request.parseError\n    ? 'conversation_context_tools received invalid JSON input.'\n    : 'conversation_context_tools does not support action: ' + (request.requestedAction || '(empty)') + '. Supported action: resolve_context.');\n\nreturn [{\n  json: {\n    ok: false,\n    action: request.error ? 'resolve_context' : (request.action || 'unknown_action'),\n    contextType: 'none',\n    output,\n    messages: [],\n    limits: {\n      limit: request.limit || 10,\n      truncated: false\n    },\n    error: request.error || {\n      code: request.parseError ? 'INVALID_TOOL_INPUT' : 'UNSUPPORTED_ACTION',\n      message: output,\n      retryable: false\n    },\n    meta: {\n      chatId: request.chatId || '',\n      currentMessageId: request.currentMessageId || '',\n      referencedMessageId: request.referencedMessageId || '',\n      threadId: request.threadId || '',\n      rootId: request.rootId || '',\n      parentId: request.parentId || ''\n    }\n  }\n}];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -305,7 +159,7 @@
       "main": [
         [
           {
-            "node": "Has referencedMessageId",
+            "node": "Has context target",
             "type": "main",
             "index": 0
           }
@@ -319,26 +173,15 @@
         ]
       ]
     },
-    "Has referencedMessageId": {
+    "Has context target": {
       "main": [
         [
           {
-            "node": "HTTP get referenced message",
+            "node": "HTTP get context",
             "type": "main",
             "index": 0
           }
         ],
-        [
-          {
-            "node": "Has threadId",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "HTTP get referenced message": {
-      "main": [
         [
           {
             "node": "Format context result",
@@ -348,54 +191,7 @@
         ]
       ]
     },
-    "Has threadId": {
-      "main": [
-        [
-          {
-            "node": "HTTP get thread messages",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Has chatId",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "HTTP get thread messages": {
-      "main": [
-        [
-          {
-            "node": "Format context result",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Has chatId": {
-      "main": [
-        [
-          {
-            "node": "HTTP get recent chat messages",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Format missing identifiers",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "HTTP get recent chat messages": {
+    "HTTP get context": {
       "main": [
         [
           {

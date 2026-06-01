@@ -10,10 +10,24 @@ function codeOf(workflow, name) {
   return workflow.nodes.find((node) => node.name === name).parameters.jsCode;
 }
 
-async function run(code, { input = [], nodes = {}, helpers = {} } = {}) {
+async function run(
+  code,
+  { input = [], nodes = {}, helpers = {}, strictNodeExecution = false } = {},
+) {
   const fn = new AsyncFunction('$input', '$', '$helpers', code);
   const $input = { all: () => input, first: () => input[0] };
-  const $ = (name) => ({ all: () => nodes[name] || [] });
+  const $ = (name) => {
+    const isExecuted = Object.prototype.hasOwnProperty.call(nodes, name);
+    return {
+      isExecuted,
+      all: () => {
+        if (strictNodeExecution && !isExecuted) {
+          throw new Error('Referenced node is unexecuted: ' + name);
+        }
+        return nodes[name] || [];
+      },
+    };
+  };
   return fn($input, $, helpers);
 }
 
@@ -43,6 +57,7 @@ const bot = readWorkflow('OAR_bot_task_tools.json');
 const oar = readWorkflow('OAR.json');
 const okrWrite = readWorkflow('OAR_okr_write_tools.json');
 const larkRead = readWorkflow('OAR_lark_read_tools.json');
+const conversationContext = readWorkflow('OAR_conversation_context_tools.json');
 
 const readResult = await run(codeOf(okr, 'Format OKR result'), {
   input: [
@@ -542,6 +557,195 @@ assert(
   'AI Agent should describe read-only task/contact privacy boundaries',
 );
 
+const conversationContextTool = oar.nodes.find(
+  (node) => node.name === 'conversation_context_tools',
+);
+assert(conversationContextTool, 'conversation_context_tools should be connected to the main agent');
+assert(
+  conversationContextTool.parameters.workflowInputs.value.query.includes('$fromAI') &&
+    conversationContextTool.parameters.workflowInputs.value.trustedContextHintsJson.includes(
+      '$json.entities.message.contextHints',
+    ),
+  'conversation_context_tools should bind trusted context hints outside the AI query',
+);
+assert(
+  systemMessage.includes('不要传 contextHints、chatId、referencedMessageId、threadId') &&
+    systemMessage.includes('reference > thread > chat'),
+  'AI Agent should describe the trusted context ID boundary',
+);
+
+const contextNodeNames = conversationContext.nodes.map((node) => node.name);
+const contextHttpNodes = conversationContext.nodes.filter(
+  (node) => node.type === 'n8n-nodes-base.httpRequest',
+);
+assert(
+  contextHttpNodes.length === 1 && contextHttpNodes[0].name === 'HTTP get context',
+  'conversation_context_tools should use one unified HTTP get context node',
+);
+assert(
+  !contextNodeNames.some((name) => /^HTTP get /.test(name) && name !== 'HTTP get context'),
+  'conversation_context_tools should not keep legacy split HTTP context nodes',
+);
+
+const contextNormalizeCode = codeOf(conversationContext, 'Normalize');
+const contextAllHints = await run(contextNormalizeCode, {
+  input: [
+    {
+      json: {
+        query: JSON.stringify({
+          action: 'resolve_context',
+          limit: 12,
+        }),
+        trustedContextHintsJson: JSON.stringify({
+          referencedMessageId: 'om_ref',
+          threadId: 'omt_thread',
+          chatId: 'oc_chat',
+        }),
+      },
+    },
+  ],
+});
+assert(
+  contextAllHints[0].json.contextType === 'reference',
+  'conversation normalize should prioritize referenced message over thread/chat',
+);
+assert(
+  contextAllHints[0].json.contextQuery.message_ids === 'om_ref' &&
+    contextAllHints[0].json.contextUrl.includes('/im/v1/messages/mget?') &&
+    contextAllHints[0].json.contextUrl.includes('message_ids=om_ref'),
+  'reference context should use mget URL and message_ids query',
+);
+
+const contextThread = await run(contextNormalizeCode, {
+  input: [
+    {
+      json: {
+        query: JSON.stringify({
+          action: 'resolve_context',
+          limit: 99,
+        }),
+        trustedContextHintsJson: JSON.stringify({
+          threadId: 'omt_thread_only',
+          chatId: 'oc_chat_fallback',
+        }),
+      },
+    },
+  ],
+});
+assert(
+  contextThread[0].json.contextType === 'thread',
+  'conversation normalize should use thread context when no reference id exists',
+);
+assert(
+  contextThread[0].json.contextQuery.container_id_type === 'thread' &&
+    contextThread[0].json.contextQuery.container_id === 'omt_thread_only' &&
+    contextThread[0].json.contextQuery.sort_type === 'ByCreateTimeAsc' &&
+    contextThread[0].json.contextQuery.page_size === 20 &&
+    contextThread[0].json.contextUrl.includes('container_id_type=thread'),
+  'thread context should use thread query and clamped page_size',
+);
+
+const contextChat = await run(contextNormalizeCode, {
+  input: [
+    {
+      json: {
+        query: JSON.stringify({
+          action: 'resolve_context',
+          limit: 3,
+        }),
+        trustedContextHintsJson: JSON.stringify({
+          chatId: 'oc_recent_chat',
+        }),
+      },
+    },
+  ],
+});
+assert(
+  contextChat[0].json.contextType === 'recent_chat',
+  'conversation normalize should fallback to recent chat context',
+);
+assert(
+  contextChat[0].json.contextQuery.container_id_type === 'chat' &&
+    contextChat[0].json.contextQuery.container_id === 'oc_recent_chat' &&
+    contextChat[0].json.contextQuery.sort_type === 'ByCreateTimeDesc' &&
+    contextChat[0].json.contextQuery.page_size === 3 &&
+    contextChat[0].json.contextUrl.includes('container_id_type=chat'),
+  'recent chat context should use chat query and descending sort',
+);
+
+const contextNoIdentifiers = await run(contextNormalizeCode, {
+  input: [
+    {
+      json: {
+        query: JSON.stringify({
+          action: 'resolve_context',
+          limit: 5,
+        }),
+        trustedContextHintsJson: '{}',
+      },
+    },
+  ],
+});
+const contextMissingIdentifiers = await run(codeOf(conversationContext, 'Format context result'), {
+  input: [{ json: {} }],
+  nodes: { Normalize: contextNoIdentifiers },
+});
+const contextMissingOutput = String(contextMissingIdentifiers[0].json.output || '');
+assert(
+  contextMissingIdentifiers[0].json.error.code === 'MISSING_CONTEXT_IDENTIFIERS' &&
+    /referencedMessageId/i.test(contextMissingOutput) &&
+    /threadId/i.test(contextMissingOutput) &&
+    /chatId/i.test(contextMissingOutput),
+  'missing context identifiers should return a clear format error',
+);
+
+const forgedContext = await run(contextNormalizeCode, {
+  input: [
+    {
+      json: {
+        query: JSON.stringify({
+          action: 'resolve_context',
+          chatId: 'oc_external',
+        }),
+        trustedContextHintsJson: JSON.stringify({
+          chatId: 'oc_current',
+        }),
+      },
+    },
+  ],
+});
+assert(
+  forgedContext[0].json.error.code === 'DIRECT_CONTEXT_ID_FORBIDDEN' &&
+    forgedContext[0].json.contextUrl === '',
+  'conversation normalize should reject AI-supplied context ids',
+);
+const formattedForgedContext = await run(
+  codeOf(conversationContext, 'Format unsupported action'),
+  {
+    input: forgedContext,
+  },
+);
+assert(
+  formattedForgedContext[0].json.error.code === 'DIRECT_CONTEXT_ID_FORBIDDEN',
+  'conversation context should return a stable error for AI-supplied context ids',
+);
+
+const okrWriteNodeNames = okrWrite.nodes.map((node) => node.name);
+assert(
+  okrWriteNodeNames.includes('Get OKR for proposal') &&
+    okrWriteNodeNames.includes('Get OKR for drift check') &&
+    okrWriteNodeNames.includes('Patch OKR target'),
+  'okr_write_tools should keep unified proposal/drift/patch HTTP nodes',
+);
+assert(
+  !okrWrite.nodes.some(
+    (node) =>
+      node.type === 'n8n-nodes-base.httpRequest' &&
+      /(objective|key[_ ]?result)/i.test(node.name),
+  ),
+  'okr_write_tools should not keep legacy target-split HTTP nodes',
+);
+
 const writeNormalizeCode = codeOf(okrWrite, 'Normalize');
 const writeTrustedInput = {
   trustedSenderOpenId: 'ou_1',
@@ -579,6 +783,38 @@ assert(
   validateProposal[0].json.patchBody.score === 0.8,
   'score should normalize 80% to 0.8',
 );
+assert(
+  validateProposal[0].json.okrHttpMethod === 'GET' &&
+    validateProposal[0].json.okrHttpUrl ===
+      'https://open.feishu.cn/open-apis/okr/v2/key_results/kr_1',
+  'KR proposal validation should output key_result GET URL',
+);
+
+const objectiveNormalize = await run(writeNormalizeCode, {
+  input: [
+    {
+      json: {
+        ...writeTrustedInput,
+        query: JSON.stringify({
+          action: 'propose_okr_update',
+          targetType: 'objective',
+          targetId: 'obj_1',
+          patch: { contentText: '更新 Objective 文案' },
+        }),
+      },
+    },
+  ],
+});
+const objectiveValidateProposal = await run(codeOf(okrWrite, 'Validate update proposal'), {
+  input: [{ json: objectiveNormalize[0].json }],
+  nodes: { Normalize: objectiveNormalize },
+});
+assert(
+  objectiveValidateProposal[0].json.okrHttpMethod === 'GET' &&
+    objectiveValidateProposal[0].json.okrHttpUrl ===
+      'https://open.feishu.cn/open-apis/okr/v2/objectives/obj_1',
+  'objective proposal validation should output objective GET URL',
+);
 
 const forbiddenProposalNormalize = await run(writeNormalizeCode, {
   input: [
@@ -602,6 +838,14 @@ const forbiddenProposal = await run(codeOf(okrWrite, 'Validate update proposal')
 assert(
   forbiddenProposal[0].json.error.code === 'FORBIDDEN_OKR_FIELD',
   'forbidden OKR fields should be rejected',
+);
+const formattedForbiddenProposal = await run(codeOf(okrWrite, 'Format proposal result'), {
+  input: forbiddenProposal,
+  strictNodeExecution: true,
+});
+assert(
+  formattedForbiddenProposal[0].json.error.code === 'FORBIDDEN_OKR_FIELD',
+  'proposal validation failures should not read an unexecuted build node',
 );
 
 const fuzzyDeadlineNormalize = await run(writeNormalizeCode, {
@@ -734,6 +978,12 @@ assert(
   verifiedExecute[0].json.patchBody.score === 0.8,
   'execute should use stored patch body, not execute payload',
 );
+assert(
+  verifiedExecute[0].json.okrHttpMethod === 'GET' &&
+    verifiedExecute[0].json.okrHttpUrl ===
+      'https://open.feishu.cn/open-apis/okr/v2/key_results/kr_1',
+  'verify update proposal should output drift-check GET URL',
+);
 
 const sameMessageNormalize = await run(writeNormalizeCode, {
   input: [
@@ -787,6 +1037,12 @@ const driftClear = await run(codeOf(okrWrite, 'Check OKR drift'), {
   nodes: { 'Verify update proposal': verifiedExecute },
 });
 assert(driftClear[0].json.ok === true, 'unchanged OKR should pass drift check');
+assert(
+  driftClear[0].json.okrHttpMethod === 'PATCH' &&
+    driftClear[0].json.okrHttpUrl ===
+      'https://open.feishu.cn/open-apis/okr/v2/key_results/kr_1',
+  'drift check should output patch PATCH URL',
+);
 
 const driftDetected = await run(codeOf(okrWrite, 'Check OKR drift'), {
   input: [
@@ -823,6 +1079,14 @@ assert(
   driftDetected[0].json.error.code === 'OKR_DRIFT_DETECTED',
   'changed OKR should fail drift check',
 );
+const formattedDriftFailure = await run(codeOf(okrWrite, 'Format execute result'), {
+  input: driftDetected,
+  strictNodeExecution: true,
+});
+assert(
+  formattedDriftFailure[0].json.error.code === 'OKR_DRIFT_DETECTED',
+  'drift failures should not read an unexecuted patch result node',
+);
 
 const patchFormatted = await run(codeOf(okrWrite, 'Format patch result'), {
   input: [{ json: { key_result: { id: 'kr_1', score: 0.8 } } }],
@@ -835,6 +1099,10 @@ assert(
 );
 
 const prepareCode = codeOf(oar, 'Prepare incoming message');
+assert(
+  !prepareCode.includes('ask_bot'),
+  'Prepare incoming message should not keep legacy ask_bot intent',
+);
 
 function prepareOutput(result, label) {
   const output = result[0]?.json;
@@ -913,6 +1181,16 @@ const dispatchSemantic = prepareOutput(dispatchIntent, 'bot dispatch message');
 assert(
   dispatchSemantic.signals.wantsBotDispatch === true || dispatchSemantic.intentHint === 'dispatch_bot_task',
   'bot dispatch message should expose dispatch semantics',
+);
+
+const dispatchDialogIntent = await run(prepareCode, {
+  input: [larkTextEvent('问 research_bot 机器人', 'om_ask_bot')],
+});
+const dispatchDialogSemantic = prepareOutput(dispatchDialogIntent, 'bot dialog dispatch message');
+assert(
+  dispatchDialogSemantic.intentHint === 'dispatch_bot_task' &&
+    dispatchDialogSemantic.signals.wantsBotDialog === true,
+  'bot dialog message should route to dispatch_bot_task with wantsBotDialog',
 );
 
 const taskReadIntent = await run(prepareCode, {
@@ -1048,13 +1326,28 @@ console.log(
       okr_write_tools: {
         proposalAction: writeNormalize[0].json.action,
         score: validateProposal[0].json.patchBody.score,
+        krProposalUrl: validateProposal[0].json.okrHttpUrl,
+        objectiveProposalUrl: objectiveValidateProposal[0].json.okrHttpUrl,
         forbidden: forbiddenProposal[0].json.error.code,
         fuzzyDeadline: fuzzyDeadline[0].json.error.code,
         proposalId,
         exactConfirm: verifiedExecute[0].json.ok,
+        driftGetUrl: verifiedExecute[0].json.okrHttpUrl,
         sameMessage: sameMessage[0].json.error.code,
         drift: driftDetected[0].json.error.code,
+        patchUrl: driftClear[0].json.okrHttpUrl,
         patchStatus: patchFormatted[0].json.proposalStatus,
+      },
+      conversation_context_tools: {
+        contextHttpNode: contextHttpNodes[0].name,
+        referenceType: contextAllHints[0].json.contextType,
+        referenceUrl: contextAllHints[0].json.contextUrl,
+        threadType: contextThread[0].json.contextType,
+        threadUrl: contextThread[0].json.contextUrl,
+        chatType: contextChat[0].json.contextType,
+        chatUrl: contextChat[0].json.contextUrl,
+        missingContextError: contextMissingIdentifiers[0].json.error.code,
+        forgedContextError: formattedForgedContext[0].json.error.code,
       },
       lark_read_tools: {
         taskListType: listMyTasks[0].json.taskListParams.type,
@@ -1072,6 +1365,10 @@ console.log(
         dispatch: {
           intentHint: dispatchSemantic.intentHint,
           wantsBotDispatch: dispatchSemantic.signals.wantsBotDispatch,
+        },
+        dispatchDialog: {
+          intentHint: dispatchDialogSemantic.intentHint,
+          wantsBotDialog: dispatchDialogSemantic.signals.wantsBotDialog,
         },
         taskRead: {
           intentHint: taskReadSemantic.intentHint,

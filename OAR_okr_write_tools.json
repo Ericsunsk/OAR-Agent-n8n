@@ -73,7 +73,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const request = $('Normalize').all()[0]?.json ?? {};\nconst payload = request.toolInput ?? {};\n\nfunction str(value) {\n  return String(value ?? '').trim();\n}\n\nfunction finish(ok, output, extra = {}, errorCode = 'PROPOSE_OKR_UPDATE_FAILED') {\n  return [{\n    json: {\n      ...extra,\n      ok,\n      action: 'propose_okr_update',\n      version: 'v1',\n      error: ok ? null : { code: errorCode, message: output, retryable: false },\n      output,\n    },\n  }];\n}\n\nfunction hasOwn(obj, key) {\n  return Object.prototype.hasOwnProperty.call(obj, key);\n}\n\nfunction findForbidden(value, path = '') {\n  const forbidden = new Set([\n    'delete',\n    'weight',\n    'order',\n    'position',\n    'alignment',\n    'indicator',\n    'indicators',\n    'notes',\n    'category_id',\n    'progress',\n    'owner',\n    'mentioned_user_list',\n  ]);\n  if (!value || typeof value !== 'object') return '';\n  for (const [key, nested] of Object.entries(value)) {\n    const normalized = key.toLowerCase();\n    if (forbidden.has(normalized)) return path ? path + '.' + key : key;\n    const found = findForbidden(nested, path ? path + '.' + key : key);\n    if (found) return found;\n  }\n  return '';\n}\n\nfunction contentBlock(text) {\n  return {\n    blocks: [\n      {\n        block_element_type: 'paragraph',\n        paragraph: {\n          elements: [\n            {\n              paragraph_element_type: 'textRun',\n              text_run: { text },\n            },\n          ],\n        },\n      },\n    ],\n  };\n}\n\nfunction parseScore(value) {\n  if (value === undefined || value === null || value === '') return { present: false };\n  const raw = String(value).trim();\n  const percent = raw.endsWith('%');\n  const numeric = Number(percent ? raw.slice(0, -1) : raw);\n  if (!Number.isFinite(numeric)) return { error: 'INVALID_SCORE' };\n  const score = percent || numeric > 1 ? numeric / 100 : numeric;\n  if (score < 0 || score > 1) return { error: 'SCORE_OUT_OF_RANGE' };\n  return { present: true, value: Math.round(score * 10) / 10 };\n}\n\nfunction parseDeadline(value) {\n  if (value === undefined || value === null || value === '') return { present: false };\n  const raw = String(value).trim();\n  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(raw)) return { error: 'DEADLINE_REQUIRES_YYYY_MM_DD' };\n  const ms = Date.parse(raw + 'T23:59:59+08:00');\n  if (!Number.isFinite(ms)) return { error: 'INVALID_DEADLINE' };\n  return { present: true, value: String(ms), display: raw };\n}\n\nif (request.parseError) return finish(false, '修改 OKR 的参数不是有效 JSON。', {}, 'INVALID_TOOL_INPUT');\nif (!request.trusted?.senderOpenId || !request.trusted?.messageId || !request.trusted?.sessionKey) {\n  return finish(false, '缺少可信消息上下文，不能修改 OKR。', {}, 'MISSING_TRUSTED_CONTEXT');\n}\n\nconst patchInput = payload.patch && typeof payload.patch === 'object' && !Array.isArray(payload.patch)\n  ? payload.patch\n  : payload;\nconst forbidden = findForbidden(patchInput);\nif (forbidden) {\n  return finish(false, '暂不支持修改字段：' + forbidden + '。', { forbiddenField: forbidden }, 'FORBIDDEN_OKR_FIELD');\n}\n\nconst targetTypeRaw = str(payload.targetType || payload.entityType || payload.type);\nconst targetType = ['objective', 'o'].includes(targetTypeRaw.toLowerCase())\n  ? 'objective'\n  : (['key_result', 'keyResult', 'kr', 'key-result'].includes(targetTypeRaw) || targetTypeRaw.toLowerCase() === 'keyresult'\n    ? 'key_result'\n    : '');\nconst targetId = str(payload.targetId || payload.entityId || payload.objectiveId || payload.keyResultId);\n\nif (!targetType) return finish(false, '缺少 targetType，目前只支持 objective 或 key_result。', {}, 'MISSING_TARGET_TYPE');\nif (!targetId) return finish(false, '缺少 targetId/objectiveId/keyResultId。', {}, 'MISSING_TARGET_ID');\nif (payload.targetUserId && str(payload.targetUserId) !== request.trusted.senderOpenId) {\n  return finish(false, '第一版只允许修改你自己的 OKR。', {}, 'WRITE_SELF_ONLY');\n}\n\nconst patchBody = {};\nconst patchSummary = [];\nconst contentValue = hasOwn(patchInput, 'contentText') ? patchInput.contentText\n  : (hasOwn(patchInput, 'newContent') ? patchInput.newContent\n    : (hasOwn(patchInput, 'content') ? patchInput.content : undefined));\nif (contentValue !== undefined) {\n  if (typeof contentValue !== 'string') return finish(false, 'content 只接受纯文本。', {}, 'CONTENT_MUST_BE_TEXT');\n  const text = str(contentValue);\n  if (!text) return finish(false, 'content 不能为空。', {}, 'EMPTY_CONTENT');\n  if (text.length > 300) return finish(false, 'content 过长，第一版最多 300 字。', {}, 'CONTENT_TOO_LONG');\n  patchBody.content = contentBlock(text);\n  patchSummary.push('内容 -> ' + text);\n}\n\nconst scoreValue = hasOwn(patchInput, 'score') ? patchInput.score : (hasOwn(patchInput, 'progress') ? patchInput.progress : undefined);\nconst score = parseScore(scoreValue);\nif (score.error) return finish(false, '分数必须在 0-1 或 0%-100% 之间。', {}, score.error);\nif (score.present) {\n  patchBody.score = score.value;\n  patchSummary.push('分数 -> ' + score.value + ' (' + Math.round(score.value * 100) + '%)');\n}\n\nconst deadline = parseDeadline(hasOwn(patchInput, 'deadline') ? patchInput.deadline : patchInput.deadlineDate);\nif (deadline.error) return finish(false, '截止日期必须使用明确日期 YYYY-MM-DD。', {}, deadline.error);\nif (deadline.present) {\n  patchBody.deadline = deadline.value;\n  patchSummary.push('截止日期 -> ' + deadline.display);\n}\n\nif (Object.keys(patchBody).length === 0) {\n  return finish(false, '没有可修改字段。第一版只支持 content、score、deadline。', {}, 'EMPTY_PATCH');\n}\n\nreturn finish(true, 'OKR 修改请求已通过基础校验。', {\n  targetType,\n  targetId,\n  patchBody,\n  patchSummary,\n  trusted: request.trusted,\n});"
+        "jsCode": "const request = $('Normalize').all()[0]?.json ?? {};\nconst payload = request.toolInput ?? {};\n\nfunction str(value) {\n  return String(value ?? '').trim();\n}\n\nfunction finish(ok, output, extra = {}, errorCode = 'PROPOSE_OKR_UPDATE_FAILED') {\n  return [{\n    json: {\n      ...extra,\n      ok,\n      action: 'propose_okr_update',\n      version: 'v1',\n      error: ok ? null : { code: errorCode, message: output, retryable: false },\n      output,\n    },\n  }];\n}\n\nfunction hasOwn(obj, key) {\n  return Object.prototype.hasOwnProperty.call(obj, key);\n}\n\nfunction findForbidden(value, path = '') {\n  const forbidden = new Set([\n    'delete',\n    'weight',\n    'order',\n    'position',\n    'alignment',\n    'indicator',\n    'indicators',\n    'notes',\n    'category_id',\n    'progress',\n    'owner',\n    'mentioned_user_list',\n  ]);\n  if (!value || typeof value !== 'object') return '';\n  for (const [key, nested] of Object.entries(value)) {\n    const normalized = key.toLowerCase();\n    if (forbidden.has(normalized)) return path ? path + '.' + key : key;\n    const found = findForbidden(nested, path ? path + '.' + key : key);\n    if (found) return found;\n  }\n  return '';\n}\n\nfunction contentBlock(text) {\n  return {\n    blocks: [\n      {\n        block_element_type: 'paragraph',\n        paragraph: {\n          elements: [\n            {\n              paragraph_element_type: 'textRun',\n              text_run: { text },\n            },\n          ],\n        },\n      },\n    ],\n  };\n}\n\nfunction parseScore(value) {\n  if (value === undefined || value === null || value === '') return { present: false };\n  const raw = String(value).trim();\n  const percent = raw.endsWith('%');\n  const numeric = Number(percent ? raw.slice(0, -1) : raw);\n  if (!Number.isFinite(numeric)) return { error: 'INVALID_SCORE' };\n  const score = percent || numeric > 1 ? numeric / 100 : numeric;\n  if (score < 0 || score > 1) return { error: 'SCORE_OUT_OF_RANGE' };\n  return { present: true, value: Math.round(score * 10) / 10 };\n}\n\nfunction parseDeadline(value) {\n  if (value === undefined || value === null || value === '') return { present: false };\n  const raw = String(value).trim();\n  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(raw)) return { error: 'DEADLINE_REQUIRES_YYYY_MM_DD' };\n  const ms = Date.parse(raw + 'T23:59:59+08:00');\n  if (!Number.isFinite(ms)) return { error: 'INVALID_DEADLINE' };\n  return { present: true, value: String(ms), display: raw };\n}\n\nif (request.parseError) return finish(false, '修改 OKR 的参数不是有效 JSON。', {}, 'INVALID_TOOL_INPUT');\nif (!request.trusted?.senderOpenId || !request.trusted?.messageId || !request.trusted?.sessionKey) {\n  return finish(false, '缺少可信消息上下文，不能修改 OKR。', {}, 'MISSING_TRUSTED_CONTEXT');\n}\n\nconst patchInput = payload.patch && typeof payload.patch === 'object' && !Array.isArray(payload.patch)\n  ? payload.patch\n  : payload;\nconst forbidden = findForbidden(patchInput);\nif (forbidden) {\n  return finish(false, '暂不支持修改字段：' + forbidden + '。', { forbiddenField: forbidden }, 'FORBIDDEN_OKR_FIELD');\n}\n\nconst targetTypeRaw = str(payload.targetType || payload.entityType || payload.type);\nconst targetType = ['objective', 'o'].includes(targetTypeRaw.toLowerCase())\n  ? 'objective'\n  : (['key_result', 'keyResult', 'kr', 'key-result'].includes(targetTypeRaw) || targetTypeRaw.toLowerCase() === 'keyresult'\n    ? 'key_result'\n    : '');\nconst targetId = str(payload.targetId || payload.entityId || payload.objectiveId || payload.keyResultId);\n\nif (!targetType) return finish(false, '缺少 targetType，目前只支持 objective 或 key_result。', {}, 'MISSING_TARGET_TYPE');\nif (!targetId) return finish(false, '缺少 targetId/objectiveId/keyResultId。', {}, 'MISSING_TARGET_ID');\nif (payload.targetUserId && str(payload.targetUserId) !== request.trusted.senderOpenId) {\n  return finish(false, '第一版只允许修改你自己的 OKR。', {}, 'WRITE_SELF_ONLY');\n}\n\nconst patchBody = {};\nconst patchSummary = [];\nconst contentValue = hasOwn(patchInput, 'contentText') ? patchInput.contentText\n  : (hasOwn(patchInput, 'newContent') ? patchInput.newContent\n    : (hasOwn(patchInput, 'content') ? patchInput.content : undefined));\nif (contentValue !== undefined) {\n  if (typeof contentValue !== 'string') return finish(false, 'content 只接受纯文本。', {}, 'CONTENT_MUST_BE_TEXT');\n  const text = str(contentValue);\n  if (!text) return finish(false, 'content 不能为空。', {}, 'EMPTY_CONTENT');\n  if (text.length > 300) return finish(false, 'content 过长，第一版最多 300 字。', {}, 'CONTENT_TOO_LONG');\n  patchBody.content = contentBlock(text);\n  patchSummary.push('内容 -> ' + text);\n}\n\nconst scoreValue = hasOwn(patchInput, 'score') ? patchInput.score : (hasOwn(patchInput, 'progress') ? patchInput.progress : undefined);\nconst score = parseScore(scoreValue);\nif (score.error) return finish(false, '分数必须在 0-1 或 0%-100% 之间。', {}, score.error);\nif (score.present) {\n  patchBody.score = score.value;\n  patchSummary.push('分数 -> ' + score.value + ' (' + Math.round(score.value * 100) + '%)');\n}\n\nconst deadline = parseDeadline(hasOwn(patchInput, 'deadline') ? patchInput.deadline : patchInput.deadlineDate);\nif (deadline.error) return finish(false, '截止日期必须使用明确日期 YYYY-MM-DD。', {}, deadline.error);\nif (deadline.present) {\n  patchBody.deadline = deadline.value;\n  patchSummary.push('截止日期 -> ' + deadline.display);\n}\n\nif (Object.keys(patchBody).length === 0) {\n  return finish(false, '没有可修改字段。第一版只支持 content、score、deadline。', {}, 'EMPTY_PATCH');\n}\n\nfunction okrEndpoint(targetType, targetId) {\n  const resource = targetType === 'objective' ? 'objectives' : 'key_results';\n  return 'https://open.feishu.cn/open-apis/okr/v2/' + resource + '/' + encodeURIComponent(targetId);\n}\n\nreturn finish(true, 'OKR 修改请求已通过基础校验。', {\n  targetType,\n  targetId,\n  okrHttpMethod: 'GET',\n  okrHttpUrl: okrEndpoint(targetType, targetId),\n  patchBody,\n  patchSummary,\n  trusted: request.trusted,\n});"
       },
       "id": "f23a4bc6-3ed6-47c9-95d2-ba8d9aa1ae03",
       "name": "Validate update proposal",
@@ -107,31 +107,10 @@
     },
     {
       "parameters": {
-        "conditions": {
-          "string": [
-            {
-              "value1": "={{ $json.targetType }}",
-              "operation": "equal",
-              "value2": "objective"
-            }
-          ]
-        }
-      },
-      "id": "0012c628-f937-4524-9329-d49cb91a9988",
-      "name": "Proposal target is objective",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 1,
-      "position": [
-        80,
-        -280
-      ]
-    },
-    {
-      "parameters": {
         "authentication": "predefinedCredentialType",
         "nodeCredentialType": "larkApi",
-        "method": "GET",
-        "url": "={{ 'https://open.feishu.cn/open-apis/okr/v2/objectives/' + encodeURIComponent($json.targetId) }}",
+        "method": "={{ $json.okrHttpMethod }}",
+        "url": "={{ $json.okrHttpUrl }}",
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
@@ -144,45 +123,12 @@
         "options": {}
       },
       "id": "b1b327bf-4a74-4506-bb90-2dad5afb81ae",
-      "name": "Get objective for proposal",
+      "name": "Get OKR for proposal",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
         320,
         -360
-      ],
-      "credentials": {
-        "larkApi": {
-          "id": "OZYoOaN1QpJlcZma",
-          "name": "OKR Agent"
-        }
-      },
-      "onError": "continueRegularOutput"
-    },
-    {
-      "parameters": {
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "larkApi",
-        "method": "GET",
-        "url": "={{ 'https://open.feishu.cn/open-apis/okr/v2/key_results/' + encodeURIComponent($json.targetId) }}",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            {
-              "name": "user_id_type",
-              "value": "open_id"
-            }
-          ]
-        },
-        "options": {}
-      },
-      "id": "79e13cd6-67db-494a-b127-46c7a72cd102",
-      "name": "Get key result for proposal",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.3,
-      "position": [
-        320,
-        -200
       ],
       "credentials": {
         "larkApi": {
@@ -449,7 +395,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const input = $input.all()[0]?.json ?? {};\nconst built = $('Build update proposal').all()[0]?.json;\nconst source = built?.proposalId ? built : input;\n\nfunction finish(ok, output, extra = {}, errorCode = 'PROPOSE_OKR_UPDATE_FAILED') {\n  return [{\n    json: {\n      ...extra,\n      ok,\n      action: 'propose_okr_update',\n      version: 'v1',\n      error: ok ? null : { code: errorCode, message: output, retryable: false },\n      output,\n    },\n  }];\n}\n\nif (!source.ok) return finish(false, source.output || '生成 OKR 修改草案失败。', source, source.error?.code || 'PROPOSAL_FAILED');\nif (input.error) {\n  const detail = typeof input.error === 'string' ? input.error : (input.error.message || JSON.stringify(input.error));\n  return finish(false, '保存 OKR 修改草案失败：' + detail, source, 'SAVE_PROPOSAL_FAILED');\n}\n\nreturn finish(true, source.output, {\n  status: 'pending',\n  proposalId: source.proposalId,\n  data: source.data,\n});"
+        "jsCode": "const input = $input.all()[0]?.json ?? {};\nconst builtNode = $('Build update proposal');\nconst built = builtNode.isExecuted ? builtNode.all()[0]?.json : undefined;\nconst source = built?.proposalId ? built : input;\n\nfunction finish(ok, output, extra = {}, errorCode = 'PROPOSE_OKR_UPDATE_FAILED') {\n  return [{\n    json: {\n      ...extra,\n      ok,\n      action: 'propose_okr_update',\n      version: 'v1',\n      error: ok ? null : { code: errorCode, message: output, retryable: false },\n      output,\n    },\n  }];\n}\n\nif (!source.ok) return finish(false, source.output || '生成 OKR 修改草案失败。', source, source.error?.code || 'PROPOSAL_FAILED');\nif (input.error) {\n  const detail = typeof input.error === 'string' ? input.error : (input.error.message || JSON.stringify(input.error));\n  return finish(false, '保存 OKR 修改草案失败：' + detail, source, 'SAVE_PROPOSAL_FAILED');\n}\n\nreturn finish(true, source.output, {\n  status: 'pending',\n  proposalId: source.proposalId,\n  data: source.data,\n});"
       },
       "id": "d7bea292-a88f-4cc7-bcc6-f39daeecce9d",
       "name": "Format proposal result",
@@ -519,7 +465,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const row = $input.all()[0]?.json ?? {};\nconst request = $('Normalize').all()[0]?.json ?? {};\n\nfunction str(value) {\n  return String(value ?? '').trim();\n}\n\nfunction finish(ok, output, extra = {}, errorCode = 'EXECUTE_OKR_UPDATE_FAILED') {\n  return [{\n    json: {\n      ...extra,\n      ok,\n      action: 'execute_okr_update',\n      version: 'v1',\n      error: ok ? null : { code: errorCode, message: output, retryable: false },\n      output,\n    },\n  }];\n}\n\nconst confirmMatch = str(request.trusted?.messageText).match(/^\\s*(?:确认|confirm)\\s+(okrupd_[A-Za-z0-9_-]+)\\s*$/i);\nif (!confirmMatch) return finish(false, '执行 OKR 修改前，请精确回复：确认 <proposalId>。', {}, 'CONFIRMATION_REQUIRED');\nconst proposalId = confirmMatch[1];\nif (request.proposalId && request.proposalId !== proposalId) {\n  return finish(false, '确认消息中的 proposalId 与工具参数不一致。', { proposalId }, 'PROPOSAL_ID_MISMATCH');\n}\nif (!row.proposalId) return finish(false, '没有找到该 OKR 修改草案，可能已过期或未创建。', { proposalId }, 'PROPOSAL_NOT_FOUND');\nif (row.proposalId !== proposalId) return finish(false, '读取到的 proposal 与确认消息不一致。', { proposalId, rowProposalId: row.proposalId }, 'PROPOSAL_ID_MISMATCH');\nif (row.proposalStatus !== 'pending') return finish(false, '该 OKR 修改草案状态不是 pending：' + row.proposalStatus, { proposalId, status: row.proposalStatus }, 'PROPOSAL_NOT_PENDING');\nif (Number(row.expiresAtMs || 0) < Date.now()) return finish(false, '该 OKR 修改草案已过期，请重新发起修改。', { proposalId }, 'PROPOSAL_EXPIRED');\nif (row.requesterOpenId !== request.trusted.senderOpenId) return finish(false, '只有发起人本人可以确认该 OKR 修改。', { proposalId }, 'CONFIRM_SENDER_MISMATCH');\nif (row.chatId !== request.trusted.chatId) return finish(false, '确认消息不在原会话中。', { proposalId }, 'CONFIRM_CHAT_MISMATCH');\nif (row.sessionKey !== request.trusted.sessionKey) return finish(false, '确认消息不在原上下文中。', { proposalId }, 'CONFIRM_SESSION_MISMATCH');\nif (row.sourceMessageId === request.trusted.messageId) return finish(false, '不能用创建草案的同一条消息确认执行。', { proposalId }, 'SAME_MESSAGE_CONFIRM_FORBIDDEN');\n\nlet patchBody;\nlet beforeSnapshot;\ntry {\n  patchBody = JSON.parse(row.patchBodyJson || '{}');\n  beforeSnapshot = JSON.parse(row.beforeSnapshotJson || '{}');\n} catch (error) {\n  return finish(false, '草案数据损坏，请重新发起修改。', { proposalId }, 'PROPOSAL_DATA_INVALID');\n}\n\nreturn finish(true, 'OKR 修改草案已确认，准备执行。', {\n  proposalId,\n  targetType: row.targetType,\n  targetId: row.targetId,\n  patchBody,\n  beforeSnapshot,\n  row,\n  trusted: request.trusted,\n});"
+        "jsCode": "const row = $input.all()[0]?.json ?? {};\nconst request = $('Normalize').all()[0]?.json ?? {};\n\nfunction str(value) {\n  return String(value ?? '').trim();\n}\n\nfunction finish(ok, output, extra = {}, errorCode = 'EXECUTE_OKR_UPDATE_FAILED') {\n  return [{\n    json: {\n      ...extra,\n      ok,\n      action: 'execute_okr_update',\n      version: 'v1',\n      error: ok ? null : { code: errorCode, message: output, retryable: false },\n      output,\n    },\n  }];\n}\n\nconst confirmMatch = str(request.trusted?.messageText).match(/^\\s*(?:确认|confirm)\\s+(okrupd_[A-Za-z0-9_-]+)\\s*$/i);\nif (!confirmMatch) return finish(false, '执行 OKR 修改前，请精确回复：确认 <proposalId>。', {}, 'CONFIRMATION_REQUIRED');\nconst proposalId = confirmMatch[1];\nif (request.proposalId && request.proposalId !== proposalId) {\n  return finish(false, '确认消息中的 proposalId 与工具参数不一致。', { proposalId }, 'PROPOSAL_ID_MISMATCH');\n}\nif (!row.proposalId) return finish(false, '没有找到该 OKR 修改草案，可能已过期或未创建。', { proposalId }, 'PROPOSAL_NOT_FOUND');\nif (row.proposalId !== proposalId) return finish(false, '读取到的 proposal 与确认消息不一致。', { proposalId, rowProposalId: row.proposalId }, 'PROPOSAL_ID_MISMATCH');\nif (row.proposalStatus !== 'pending') return finish(false, '该 OKR 修改草案状态不是 pending：' + row.proposalStatus, { proposalId, status: row.proposalStatus }, 'PROPOSAL_NOT_PENDING');\nif (Number(row.expiresAtMs || 0) < Date.now()) return finish(false, '该 OKR 修改草案已过期，请重新发起修改。', { proposalId }, 'PROPOSAL_EXPIRED');\nif (row.requesterOpenId !== request.trusted.senderOpenId) return finish(false, '只有发起人本人可以确认该 OKR 修改。', { proposalId }, 'CONFIRM_SENDER_MISMATCH');\nif (row.chatId !== request.trusted.chatId) return finish(false, '确认消息不在原会话中。', { proposalId }, 'CONFIRM_CHAT_MISMATCH');\nif (row.sessionKey !== request.trusted.sessionKey) return finish(false, '确认消息不在原上下文中。', { proposalId }, 'CONFIRM_SESSION_MISMATCH');\nif (row.sourceMessageId === request.trusted.messageId) return finish(false, '不能用创建草案的同一条消息确认执行。', { proposalId }, 'SAME_MESSAGE_CONFIRM_FORBIDDEN');\n\nfunction okrEndpoint(targetType, targetId) {\n  const resource = targetType === 'objective' ? 'objectives' : 'key_results';\n  return 'https://open.feishu.cn/open-apis/okr/v2/' + resource + '/' + encodeURIComponent(targetId);\n}\n\nlet patchBody;\nlet beforeSnapshot;\ntry {\n  patchBody = JSON.parse(row.patchBodyJson || '{}');\n  beforeSnapshot = JSON.parse(row.beforeSnapshotJson || '{}');\n} catch (error) {\n  return finish(false, '草案数据损坏，请重新发起修改。', { proposalId }, 'PROPOSAL_DATA_INVALID');\n}\n\nreturn finish(true, 'OKR 修改草案已确认，准备执行。', {\n  proposalId,\n  targetType: row.targetType,\n  targetId: row.targetId,\n  okrHttpMethod: 'GET',\n  okrHttpUrl: okrEndpoint(row.targetType, row.targetId),\n  patchBody,\n  beforeSnapshot,\n  row,\n  trusted: request.trusted,\n});"
       },
       "id": "244ee17e-c449-44b1-bde5-8135fd377cef",
       "name": "Verify update proposal",
@@ -553,31 +499,10 @@
     },
     {
       "parameters": {
-        "conditions": {
-          "string": [
-            {
-              "value1": "={{ $json.targetType }}",
-              "operation": "equal",
-              "value2": "objective"
-            }
-          ]
-        }
-      },
-      "id": "67fc05bb-116a-4dbd-a6b1-740923b07fdb",
-      "name": "Drift target is objective",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 1,
-      "position": [
-        560,
-        0
-      ]
-    },
-    {
-      "parameters": {
         "authentication": "predefinedCredentialType",
         "nodeCredentialType": "larkApi",
-        "method": "GET",
-        "url": "={{ 'https://open.feishu.cn/open-apis/okr/v2/objectives/' + encodeURIComponent($json.targetId) }}",
+        "method": "={{ $json.okrHttpMethod }}",
+        "url": "={{ $json.okrHttpUrl }}",
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
@@ -590,7 +515,7 @@
         "options": {}
       },
       "id": "a7c012f8-cbe7-4cb9-bdf0-ab49ffb31070",
-      "name": "Get objective for drift check",
+      "name": "Get OKR for drift check",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
@@ -607,41 +532,8 @@
     },
     {
       "parameters": {
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "larkApi",
-        "method": "GET",
-        "url": "={{ 'https://open.feishu.cn/open-apis/okr/v2/key_results/' + encodeURIComponent($json.targetId) }}",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            {
-              "name": "user_id_type",
-              "value": "open_id"
-            }
-          ]
-        },
-        "options": {}
-      },
-      "id": "123cad9e-c2fd-49b4-a556-710e24307552",
-      "name": "Get key result for drift check",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.3,
-      "position": [
-        800,
-        80
-      ],
-      "credentials": {
-        "larkApi": {
-          "id": "OZYoOaN1QpJlcZma",
-          "name": "OKR Agent"
-        }
-      },
-      "onError": "continueRegularOutput"
-    },
-    {
-      "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const currentInput = $input.all()[0]?.json ?? {};\nconst request = $('Verify update proposal').all()[0]?.json ?? {};\n\nfunction finish(ok, output, extra = {}, errorCode = 'EXECUTE_OKR_UPDATE_FAILED') {\n  return [{\n    json: {\n      ...extra,\n      ok,\n      action: 'execute_okr_update',\n      version: 'v1',\n      error: ok ? null : { code: errorCode, message: output, retryable: false },\n      output,\n    },\n  }];\n}\n\nfunction contentText(content) {\n  const blocks = content?.blocks;\n  if (!Array.isArray(blocks)) return '';\n  const parts = [];\n  for (const block of blocks) {\n    const elements = block?.paragraph?.elements;\n    if (!Array.isArray(elements)) continue;\n    for (const element of elements) {\n      const text = element?.text_run?.text;\n      if (text) parts.push(String(text));\n    }\n  }\n  return parts.join('');\n}\n\nfunction entityFrom(input, targetType) {\n  if (targetType === 'objective') return input.objective ?? input.data?.objective;\n  return input.key_result ?? input.keyResult ?? input.data?.key_result ?? input.data?.keyResult;\n}\n\nif (!request.ok) return finish(false, request.output || '确认未通过。', request, request.error?.code || 'CONFIRMATION_FAILED');\nif (currentInput.error) {\n  const detail = typeof currentInput.error === 'string' ? currentInput.error : (currentInput.error.message || JSON.stringify(currentInput.error));\n  return finish(false, '执行前重新读取 OKR 失败：' + detail, request, 'READ_TARGET_FAILED');\n}\nif (currentInput.code && currentInput.code !== 0) {\n  return finish(false, '执行前重新读取 OKR 失败：' + (currentInput.msg || JSON.stringify(currentInput)), request, 'READ_TARGET_API_ERROR');\n}\n\nconst entity = entityFrom(currentInput, request.targetType);\nif (!entity?.id) return finish(false, '执行前没有找到目标 OKR 项。', request, 'TARGET_NOT_FOUND');\nconst before = request.beforeSnapshot || {};\nconst currentSnapshot = {\n  contentText: contentText(entity.content),\n  score: entity.score ?? null,\n  deadline: entity.deadline ?? '',\n  updateTime: entity.update_time ?? '',\n};\n\nconst drift = [];\nif (String(before.updateTime ?? '') && String(before.updateTime ?? '') !== String(currentSnapshot.updateTime ?? '')) drift.push('updateTime');\nif (String(before.contentText ?? '') !== String(currentSnapshot.contentText ?? '')) drift.push('content');\nif (String(before.score ?? '') !== String(currentSnapshot.score ?? '')) drift.push('score');\nif (String(before.deadline ?? '') !== String(currentSnapshot.deadline ?? '')) drift.push('deadline');\nif (drift.length) {\n  return finish(false, 'OKR 已在草案生成后发生变化，请重新生成修改草案。', {\n    ...request,\n    drift,\n    currentSnapshot,\n  }, 'OKR_DRIFT_DETECTED');\n}\n\nreturn finish(true, 'OKR 未发生漂移，准备写入。', {\n  ...request,\n  currentSnapshot,\n});"
+        "jsCode": "const currentInput = $input.all()[0]?.json ?? {};\nconst request = $('Verify update proposal').all()[0]?.json ?? {};\n\nfunction finish(ok, output, extra = {}, errorCode = 'EXECUTE_OKR_UPDATE_FAILED') {\n  return [{\n    json: {\n      ...extra,\n      ok,\n      action: 'execute_okr_update',\n      version: 'v1',\n      error: ok ? null : { code: errorCode, message: output, retryable: false },\n      output,\n    },\n  }];\n}\n\nfunction contentText(content) {\n  const blocks = content?.blocks;\n  if (!Array.isArray(blocks)) return '';\n  const parts = [];\n  for (const block of blocks) {\n    const elements = block?.paragraph?.elements;\n    if (!Array.isArray(elements)) continue;\n    for (const element of elements) {\n      const text = element?.text_run?.text;\n      if (text) parts.push(String(text));\n    }\n  }\n  return parts.join('');\n}\n\nfunction entityFrom(input, targetType) {\n  if (targetType === 'objective') return input.objective ?? input.data?.objective;\n  return input.key_result ?? input.keyResult ?? input.data?.key_result ?? input.data?.keyResult;\n}\n\nfunction okrEndpoint(targetType, targetId) {\n  const resource = targetType === 'objective' ? 'objectives' : 'key_results';\n  return 'https://open.feishu.cn/open-apis/okr/v2/' + resource + '/' + encodeURIComponent(targetId);\n}\n\nif (!request.ok) return finish(false, request.output || '确认未通过。', request, request.error?.code || 'CONFIRMATION_FAILED');\nif (currentInput.error) {\n  const detail = typeof currentInput.error === 'string' ? currentInput.error : (currentInput.error.message || JSON.stringify(currentInput.error));\n  return finish(false, '执行前重新读取 OKR 失败：' + detail, request, 'READ_TARGET_FAILED');\n}\nif (currentInput.code && currentInput.code !== 0) {\n  return finish(false, '执行前重新读取 OKR 失败：' + (currentInput.msg || JSON.stringify(currentInput)), request, 'READ_TARGET_API_ERROR');\n}\n\nconst entity = entityFrom(currentInput, request.targetType);\nif (!entity?.id) return finish(false, '执行前没有找到目标 OKR 项。', request, 'TARGET_NOT_FOUND');\nconst before = request.beforeSnapshot || {};\nconst currentSnapshot = {\n  contentText: contentText(entity.content),\n  score: entity.score ?? null,\n  deadline: entity.deadline ?? '',\n  updateTime: entity.update_time ?? '',\n};\n\nconst drift = [];\nif (String(before.updateTime ?? '') && String(before.updateTime ?? '') !== String(currentSnapshot.updateTime ?? '')) drift.push('updateTime');\nif (String(before.contentText ?? '') !== String(currentSnapshot.contentText ?? '')) drift.push('content');\nif (String(before.score ?? '') !== String(currentSnapshot.score ?? '')) drift.push('score');\nif (String(before.deadline ?? '') !== String(currentSnapshot.deadline ?? '')) drift.push('deadline');\nif (drift.length) {\n  return finish(false, 'OKR 已在草案生成后发生变化，请重新生成修改草案。', {\n    ...request,\n    drift,\n    currentSnapshot,\n  }, 'OKR_DRIFT_DETECTED');\n}\n\nreturn finish(true, 'OKR 未发生漂移，准备写入。', {\n  ...request,\n  currentSnapshot,\n  okrHttpMethod: 'PATCH',\n  okrHttpUrl: okrEndpoint(request.targetType, request.targetId),\n});"
       },
       "id": "eb677442-3247-492d-b8f3-5d67c85c8978",
       "name": "Check OKR drift",
@@ -675,31 +567,10 @@
     },
     {
       "parameters": {
-        "conditions": {
-          "string": [
-            {
-              "value1": "={{ $json.targetType }}",
-              "operation": "equal",
-              "value2": "objective"
-            }
-          ]
-        }
-      },
-      "id": "cbc3a109-360a-4169-bc28-7df720f65945",
-      "name": "Patch target is objective",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 1,
-      "position": [
-        1520,
-        -80
-      ]
-    },
-    {
-      "parameters": {
         "authentication": "predefinedCredentialType",
         "nodeCredentialType": "larkApi",
-        "method": "PATCH",
-        "url": "={{ 'https://open.feishu.cn/open-apis/okr/v2/objectives/' + encodeURIComponent($json.targetId) }}",
+        "method": "={{ $json.okrHttpMethod }}",
+        "url": "={{ $json.okrHttpUrl }}",
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
@@ -715,48 +586,12 @@
         "jsonBody": "={{ JSON.stringify($json.patchBody) }}"
       },
       "id": "448a99ec-4d38-4a25-8f75-6298b1a0d014",
-      "name": "Patch objective",
+      "name": "Patch OKR target",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
         1760,
         -160
-      ],
-      "credentials": {
-        "larkApi": {
-          "id": "OZYoOaN1QpJlcZma",
-          "name": "OKR Agent"
-        }
-      },
-      "onError": "continueRegularOutput"
-    },
-    {
-      "parameters": {
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "larkApi",
-        "method": "PATCH",
-        "url": "={{ 'https://open.feishu.cn/open-apis/okr/v2/key_results/' + encodeURIComponent($json.targetId) }}",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            {
-              "name": "user_id_type",
-              "value": "open_id"
-            }
-          ]
-        },
-        "options": {},
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify($json.patchBody) }}"
-      },
-      "id": "fc702ab3-3403-492d-a0b4-44fca3e15c0c",
-      "name": "Patch key result",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.3,
-      "position": [
-        1760,
-        0
       ],
       "credentials": {
         "larkApi": {
@@ -901,7 +736,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const input = $input.all()[0]?.json ?? {};\nconst patch = $('Format patch result').all()[0]?.json;\nconst source = patch?.proposalId ? patch : input;\n\nfunction finish(ok, output, extra = {}, errorCode = 'EXECUTE_OKR_UPDATE_FAILED') {\n  return [{\n    json: {\n      ...extra,\n      ok,\n      action: 'execute_okr_update',\n      version: 'v1',\n      error: ok ? null : { code: errorCode, message: output, retryable: false },\n      output,\n    },\n  }];\n}\n\nif (!source.ok) return finish(false, source.output || 'OKR 修改未执行。', source, source.error?.code || 'EXECUTE_OKR_UPDATE_FAILED');\nif (input.error) {\n  const detail = typeof input.error === 'string' ? input.error : (input.error.message || JSON.stringify(input.error));\n  return finish(false, 'OKR 已写入，但更新草案状态失败：' + detail, source, 'MARK_PROPOSAL_EXECUTED_FAILED');\n}\n\nreturn finish(true, 'OKR 修改已完成。', {\n  status: 'executed',\n  proposalId: source.proposalId,\n  data: source.data,\n});"
+        "jsCode": "const input = $input.all()[0]?.json ?? {};\nconst patchNode = $('Format patch result');\nconst patch = patchNode.isExecuted ? patchNode.all()[0]?.json : undefined;\nconst source = patch?.proposalId ? patch : input;\n\nfunction finish(ok, output, extra = {}, errorCode = 'EXECUTE_OKR_UPDATE_FAILED') {\n  return [{\n    json: {\n      ...extra,\n      ok,\n      action: 'execute_okr_update',\n      version: 'v1',\n      error: ok ? null : { code: errorCode, message: output, retryable: false },\n      output,\n    },\n  }];\n}\n\nif (!source.ok) return finish(false, source.output || 'OKR 修改未执行。', source, source.error?.code || 'EXECUTE_OKR_UPDATE_FAILED');\nif (input.error) {\n  const detail = typeof input.error === 'string' ? input.error : (input.error.message || JSON.stringify(input.error));\n  return finish(false, 'OKR 已写入，但更新草案状态失败：' + detail, source, 'MARK_PROPOSAL_EXECUTED_FAILED');\n}\n\nreturn finish(true, 'OKR 修改已完成。', {\n  status: 'executed',\n  proposalId: source.proposalId,\n  data: source.data,\n});"
       },
       "id": "5272ebe3-c556-4cf6-8cc3-7a8838df92ad",
       "name": "Format execute result",
@@ -983,7 +818,7 @@
       "main": [
         [
           {
-            "node": "Proposal target is objective",
+            "node": "Get OKR for proposal",
             "type": "main",
             "index": 0
           }
@@ -991,46 +826,6 @@
         [
           {
             "node": "Format proposal result",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Proposal target is objective": {
-      "main": [
-        [
-          {
-            "node": "Get objective for proposal",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Get key result for proposal",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Get objective for proposal": {
-      "main": [
-        [
-          {
-            "node": "Build update proposal",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Get key result for proposal": {
-      "main": [
-        [
-          {
-            "node": "Build update proposal",
             "type": "main",
             "index": 0
           }
@@ -1121,7 +916,7 @@
       "main": [
         [
           {
-            "node": "Drift target is objective",
+            "node": "Get OKR for drift check",
             "type": "main",
             "index": 0
           }
@@ -1129,46 +924,6 @@
         [
           {
             "node": "Format execute result",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Drift target is objective": {
-      "main": [
-        [
-          {
-            "node": "Get objective for drift check",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Get key result for drift check",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Get objective for drift check": {
-      "main": [
-        [
-          {
-            "node": "Check OKR drift",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Get key result for drift check": {
-      "main": [
-        [
-          {
-            "node": "Check OKR drift",
             "type": "main",
             "index": 0
           }
@@ -1190,7 +945,7 @@
       "main": [
         [
           {
-            "node": "Patch target is objective",
+            "node": "Patch OKR target",
             "type": "main",
             "index": 0
           }
@@ -1198,46 +953,6 @@
         [
           {
             "node": "Format execute result",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Patch target is objective": {
-      "main": [
-        [
-          {
-            "node": "Patch objective",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Patch key result",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Patch objective": {
-      "main": [
-        [
-          {
-            "node": "Format patch result",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Patch key result": {
-      "main": [
-        [
-          {
-            "node": "Format patch result",
             "type": "main",
             "index": 0
           }
@@ -1278,6 +993,39 @@
         [
           {
             "node": "Format execute result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get OKR for proposal": {
+      "main": [
+        [
+          {
+            "node": "Build update proposal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get OKR for drift check": {
+      "main": [
+        [
+          {
+            "node": "Check OKR drift",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Patch OKR target": {
+      "main": [
+        [
+          {
+            "node": "Format patch result",
             "type": "main",
             "index": 0
           }
