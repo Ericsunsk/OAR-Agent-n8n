@@ -313,6 +313,14 @@ assert(
 
 const okrWriteTool = oar.nodes.find((node) => node.name === 'okr_write_tools');
 assert(okrWriteTool, 'okr_write_tools should be connected to the main agent');
+const aiAgent = oar.nodes.find((node) => node.name === 'AI Agent');
+const systemMessage = aiAgent?.parameters?.options?.systemMessage || '';
+assert(
+  systemMessage.includes('每次回复带 1-3 个贴合语义的 emoji') &&
+    systemMessage.includes('少用符号和 Markdown') &&
+    systemMessage.includes('默认 2-5 行'),
+  'AI Agent should keep replies concise, low-symbol, and emoji-friendly',
+);
 assert(
   okrWriteTool.parameters.workflowInputs.value.query.includes('$fromAI'),
   'okr_write_tools query should be supplied by the model',
