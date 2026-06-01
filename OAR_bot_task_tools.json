@@ -1,0 +1,49 @@
+{
+  "name": "OAR Bot Task Tools",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "357fcf29-c18f-4086-9ef1-8da9d917f899",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const raw = $input.all()[0]?.json ?? {};\nlet payload = raw.query ?? raw;\nlet parseError = false;\n\nif (typeof payload === 'string') {\n  try {\n    payload = JSON.parse(payload);\n  } catch (error) {\n    payload = {};\n    parseError = true;\n  }\n}\n\nif (!payload || typeof payload !== 'object' || Array.isArray(payload)) {\n  payload = {};\n  parseError = true;\n}\n\nconst registry = {\n  // Example for later configuration:\n  // research_bot: {\n  //   displayName: 'Research Bot',\n  //   enabled: true,\n  //   transport: 'webhook',\n  //   webhookUrl: 'https://example.com/webhook',\n  //   allowedActions: ['research', 'check'],\n  //   privacyLevel: 'minimal'\n  // }\n};\n\nfunction str(value) {\n  return String(value ?? '').trim();\n}\n\nconst truncation = { any: false };\n\nfunction clip(value, maxLength) {\n  const text = str(value);\n  if (text.length > maxLength) truncation.any = true;\n  return text.slice(0, maxLength);\n}\n\nfunction finish({ ok, output, data = {}, error = null, status = ok ? 'sent' : 'failed' }) {\n  return [{\n    json: {\n      ok,\n      action: 'dispatch_task',\n      version: 'v1',\n      status,\n      data,\n      error,\n      meta: {\n        correlationId: data.correlationId || str(payload.correlationId),\n        registrySize: Object.keys(registry).length,\n        truncated: truncation.any,\n      },\n      output,\n    },\n  }];\n}\n\nif (parseError) {\n  return finish({\n    ok: false,\n    output: 'bot_task_tools 参数不是有效 JSON。',\n    error: { code: 'INVALID_TOOL_INPUT', message: '参数不是有效 JSON。', retryable: false },\n  });\n}\n\nconst action = str(payload.action || payload.operation || payload.tool || 'dispatch_task');\nif (action !== 'dispatch_task') {\n  return finish({\n    ok: false,\n    output: 'bot_task_tools 不支持 action：' + (action || '(空)') + '。当前支持：dispatch_task。',\n    error: { code: 'UNSUPPORTED_ACTION', message: 'Unsupported action: ' + action, retryable: false },\n  });\n}\n\nconst directDestinationFields = [\n  'chatId',\n  'chat_id',\n  'webhookUrl',\n  'webhook_url',\n  'url',\n  'destination',\n  'endpoint',\n  'receive_id',\n  'receiveId',\n  'open_id',\n  'openId',\n];\nconst directDestinationField = directDestinationFields.find((field) => str(payload[field]));\nif (directDestinationField) {\n  return finish({\n    ok: false,\n    output: '派发失败：不能在参数里直接指定目标字段 ' + directDestinationField + '；请先把机器人加入 registry。',\n    error: { code: 'DIRECT_DESTINATION_FORBIDDEN', message: 'Destination must be resolved from registry.', retryable: false },\n  });\n}\n\nconst botKey = clip(payload.botKey || payload.botName || payload.bot || payload.targetBot, 128);\nconst taskType = clip(payload.taskType || payload.allowedAction || payload.type || 'other', 64);\nconst prompt = clip(payload.prompt || payload.task || payload.instruction, 1000);\nconst expectedOutput = clip(payload.expectedOutput || payload.expected_output || '', 500);\nconst correlationId = clip(payload.correlationId || payload.correlation_id || ('oar-' + Date.now()), 128);\nconst ttlSecondsRaw = Number(payload.ttlSeconds ?? payload.ttl_seconds ?? 900);\nconst ttlSeconds = Number.isFinite(ttlSecondsRaw) ? Math.min(Math.max(Math.trunc(ttlSecondsRaw), 60), 3600) : 900;\nconst contextSource = payload.minimalContext ?? payload.context ?? {};\nconst context = typeof contextSource === 'object' && contextSource && !Array.isArray(contextSource)\n  ? contextSource\n  : { summary: str(contextSource) };\nconst summary = clip(context.summary, 1000);\nconst allowedFields = Array.isArray(context.allowedFields)\n  ? context.allowedFields.map((field) => clip(field, 100)).filter(Boolean).slice(0, 20)\n  : [];\n\nif (!botKey) {\n  return finish({\n    ok: false,\n    output: '派发失败：缺少 botKey。',\n    error: { code: 'MISSING_BOT_KEY', message: 'botKey is required.', retryable: false },\n  });\n}\n\nif (!prompt) {\n  return finish({\n    ok: false,\n    output: '派发失败：缺少 task/prompt。',\n    error: { code: 'MISSING_TASK', message: 'task or prompt is required.', retryable: false },\n  });\n}\n\nconst bot = registry[botKey];\nif (!bot) {\n  return finish({\n    ok: false,\n    status: 'not_configured',\n    output: '派发失败：机器人 ' + botKey + ' 尚未配置。请先在 OAR Bot Task Tools 的 registry 中加入该机器人。',\n    data: { botKey, taskType, correlationId },\n    error: { code: 'BOT_NOT_CONFIGURED', message: 'Bot is not configured: ' + botKey, retryable: false },\n  });\n}\n\nif (bot.enabled !== true) {\n  return finish({\n    ok: false,\n    status: 'disabled',\n    output: '派发失败：机器人 ' + (bot.displayName || botKey) + ' 当前未启用。',\n    data: { botKey, taskType, correlationId },\n    error: { code: 'BOT_DISABLED', message: 'Bot is disabled: ' + botKey, retryable: false },\n  });\n}\n\nconst allowedActions = Array.isArray(bot.allowedActions) ? bot.allowedActions : [];\nif (!allowedActions.includes(taskType)) {\n  return finish({\n    ok: false,\n    status: 'not_allowed',\n    output: '派发失败：机器人 ' + (bot.displayName || botKey) + ' 不允许执行任务类型 ' + taskType + '。',\n    data: { botKey, taskType, allowedActions, correlationId },\n    error: { code: 'BOT_ACTION_NOT_ALLOWED', message: 'Task type is not allowed for bot.', retryable: false },\n  });\n}\n\nconst dispatchBody = {\n  source: 'OAR',\n  botKey,\n  taskType,\n  prompt,\n  context: { summary, allowedFields },\n  expectedOutput,\n  correlationId,\n  ttlSeconds,\n};\n\nif (bot.transport !== 'webhook' || !bot.webhookUrl) {\n  return finish({\n    ok: false,\n    status: 'not_configured',\n    output: '派发失败：机器人 ' + (bot.displayName || botKey) + ' 缺少可用 webhook 配置。',\n    data: { botKey, taskType, correlationId, sentSummary: summary },\n    error: { code: 'BOT_DESTINATION_NOT_CONFIGURED', message: 'Webhook destination missing.', retryable: false },\n  });\n}\n\ntry {\n  const response = await $helpers.httpRequest({\n    method: 'POST',\n    url: bot.webhookUrl,\n    body: dispatchBody,\n    json: true,\n    timeout: 20000,\n  });\n  return finish({\n    ok: true,\n    status: 'sent',\n    output: '已向 ' + (bot.displayName || botKey) + ' 派发任务。',\n    data: {\n      botKey,\n      botDisplayName: bot.displayName || botKey,\n      taskType,\n      correlationId,\n      sentSummary: summary,\n      expectedOutput,\n      responseSummary: typeof response === 'string' ? response.slice(0, 1000) : JSON.stringify(response).slice(0, 1000),\n    },\n  });\n} catch (error) {\n  return finish({\n    ok: false,\n    status: 'failed',\n    output: '派发失败：' + (error.message || String(error)),\n    data: { botKey, taskType, correlationId, sentSummary: summary },\n    error: { code: 'DISPATCH_HTTP_FAILED', message: error.message || String(error), retryable: true },\n  });\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "id": "6a8a8d4d-7f58-466e-b64b-dd07ad8bc5df",
+      "name": "Dispatch task"
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Dispatch task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
