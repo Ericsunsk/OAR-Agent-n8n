@@ -6,6 +6,7 @@ const workflowFiles = [
   'OAR_okr_tools.json',
   'OAR_conversation_context_tools.json',
   'OAR_bot_task_tools.json',
+  'OAR_okr_write_tools.json',
 ];
 const writableWorkflowFields = [
   'name',

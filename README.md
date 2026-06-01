@@ -8,6 +8,7 @@ OAR 是一个运行在飞书群聊/私聊中的 OKR 助手，基于 n8n Workflow
 - 结构化 OKR 返回（`data.objectives[].keyResults[]`）
 - 个人 OKR 风险分析（`analyze_okr`）
 - 团队 OKR 汇总（`summarize_group_okrs`）
+- 两段式修改自己的 Objective / KR（`propose_okr_update` -> `execute_okr_update`）
 - 读取会话引用上下文（被引用消息、话题串、近期聊天）
 - 通过白名单 registry 给其他机器人派发最小化任务（`dispatch_task`）
 
@@ -21,6 +22,8 @@ OAR 是一个运行在飞书群聊/私聊中的 OKR 助手，基于 n8n Workflow
   - 会话上下文工具子工作流（`conversation_context_tools`）
 - `OAR_bot_task_tools.json`
   - 跨机器人任务派发工具子工作流（`bot_task_tools`）
+- `OAR_okr_write_tools.json`
+  - 受控 OKR 写入工具子工作流（`okr_write_tools`）
 
 ## 前置条件
 
@@ -34,6 +37,7 @@ OAR 是一个运行在飞书群聊/私聊中的 OKR 助手，基于 n8n Workflow
 - 消息接收与发送相关权限（IM）
 - 读取群成员权限（`im:chat.members:read`）
 - OKR 读取相关权限（OKR OpenAPI）
+- 若启用 OKR 修改能力，需要 OKR 写入权限（`okr:okr.content:writeonly`）
 
 如果某些接口报 403 或空数据，请先检查飞书应用权限与租户管理员授权状态。
 
@@ -42,7 +46,8 @@ OAR 是一个运行在飞书群聊/私聊中的 OKR 助手，基于 n8n Workflow
 1. 先导入 `OAR_okr_tools.json`
 2. 再导入 `OAR_conversation_context_tools.json`
 3. 再导入 `OAR_bot_task_tools.json`
-4. 最后导入 `OAR.json`
+4. 再导入 `OAR_okr_write_tools.json`
+5. 最后导入 `OAR.json`
 
 说明：主工作流里的 `Tool Workflow` 节点会引用子工作流。若导入后引用丢失，请在节点中重新选择对应 workflow。
 
@@ -58,6 +63,12 @@ OAR 是一个运行在飞书群聊/私聊中的 OKR 助手，基于 n8n Workflow
 - `Send message`
 - `OpenAI Chat Model`
 - 子工作流中的所有 HTTP Request（`nodeCredentialType: larkApi`）
+
+OKR 修改能力还依赖 n8n Data Table：
+
+- 表名：`oar_okr_write_proposals`
+- 当前线上表 ID：`wMbt7FsvuNdigR5b`
+- 用途：保存待确认的 OKR 修改草案与执行状态
 
 ## 运行方式
 
@@ -75,6 +86,7 @@ n8n-cli workflow get NPmg6IV5BCjsBrDh --format=json > backups/<timestamp>/OAR.on
 n8n-cli workflow get YzwZbpxLpOren7HI --format=json > backups/<timestamp>/OAR_okr_tools.online.json
 n8n-cli workflow get Ucyq29dR28usv42j --format=json > backups/<timestamp>/OAR_conversation_context_tools.online.json
 n8n-cli workflow get JdeFwwuDd1tUseOl --format=json > backups/<timestamp>/OAR_bot_task_tools.online.json
+n8n-cli workflow get Qiai5nF0ENxuWOgO --format=json > backups/<timestamp>/OAR_okr_write_tools.online.json
 ```
 
 线上 API 不接受导出 JSON 中的只读字段。部署前先生成精简 payload：
@@ -83,6 +95,7 @@ n8n-cli workflow get JdeFwwuDd1tUseOl --format=json > backups/<timestamp>/OAR_bo
 node scripts/verify-workflow-code.mjs
 node scripts/prepare-deploy.mjs
 n8n-cli workflow update YzwZbpxLpOren7HI --file .deploy/OAR_okr_tools.json
+n8n-cli workflow update Qiai5nF0ENxuWOgO --file .deploy/OAR_okr_write_tools.json
 n8n-cli workflow update NPmg6IV5BCjsBrDh --file .deploy/OAR.json
 ```
 
@@ -107,6 +120,17 @@ n8n-cli workflow update NPmg6IV5BCjsBrDh --file .deploy/OAR.json
 
 - `resolve_context`
   - 读取当前消息可用的引用消息、话题串或近期聊天上下文。
+
+`okr_write_tools` 支持：
+
+- `propose_okr_update`
+  - 生成 OKR 修改草案，不直接写入。
+  - 第一版只允许修改发消息人自己的 Objective / KR 的 `contentText`、`score`、`deadline`。
+  - 禁止修改他人 OKR、删除、权重、排序、对齐、指标、备注、分类和进展记录。
+- `execute_okr_update`
+  - 只有用户在同一会话精确回复 `确认 <proposalId>` 后才执行 PATCH。
+  - 执行前会重新读取目标 OKR，若草案生成后内容、分数、截止日期或更新时间发生变化，会拒绝并要求重新生成草案。
+  - proposal 状态存储在 n8n Data Table `oar_okr_write_proposals`。
 
 `bot_task_tools` 支持：
 
