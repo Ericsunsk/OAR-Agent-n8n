@@ -146,8 +146,8 @@ n8n-cli workflow update NPmg6IV5BCjsBrDh --file .deploy/OAR.json
 
 - `list_my_tasks`
   - 读取发消息人自己负责的飞书任务。
-  - `assignee_ids` 由父工作流注入的真实 sender open_id 固定生成；AI 或用户文本里传入的其他 `open_id/user_id/assignee` 会被拒绝。
-  - 支持可选的 `completed` 和 `query` 过滤。
+  - 使用飞书 `task/v2/tasks` 的 `type=my_tasks` 标准列表接口；AI 或用户文本里传入的其他 `open_id/user_id/assignee` 会被拒绝。
+  - 支持可选的 `completed` 过滤；`query` 会在返回列表后按任务标题本地过滤。
 - `get_mentioned_users`
   - 批量读取当前消息里被 @ 用户的通讯录基础信息。
   - 允许读取的用户列表来自父工作流解析到的真实 mentions，不接受 AI 伪造。

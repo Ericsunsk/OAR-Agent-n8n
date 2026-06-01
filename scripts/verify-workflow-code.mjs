@@ -255,12 +255,18 @@ const listMyTasks = await run(larkReadNormalizeCode, {
   ],
 });
 assert(
-  listMyTasks[0].json.taskSearchBody.filter.assignee_ids[0] === 'ou_1',
-  'list_my_tasks should bind assignee to trusted sender',
+  listMyTasks[0].json.taskListParams.type === 'my_tasks',
+  'list_my_tasks should use Feishu tasks.list my_tasks scope',
 );
 assert(
-  listMyTasks[0].json.taskSearchBody.filter.is_completed === false,
+  listMyTasks[0].json.taskListParams.completed === false,
   'list_my_tasks should support completion filtering',
+);
+assert(
+  listMyTasks[0].json.taskListUrl.includes('/task/v2/tasks?') &&
+    !listMyTasks[0].json.taskListUrl.includes('/tasks/search') &&
+    !('assignee_ids' in listMyTasks[0].json.taskListParams),
+  'list_my_tasks should call the official tasks.list API without unsupported assignee filters',
 );
 
 const forgedTaskOwner = await run(larkReadNormalizeCode, {
@@ -495,6 +501,14 @@ for (const field of [
 
 const larkReadTool = oar.nodes.find((node) => node.name === 'lark_read_tools');
 assert(larkReadTool, 'lark_read_tools should be connected to the main agent');
+const larkReadTaskHttp = larkRead.nodes.find((node) => node.name === 'HTTP list my tasks');
+assert(
+  larkReadTaskHttp?.parameters?.method === 'GET' &&
+    larkReadTaskHttp.parameters.url.includes('$json.taskListUrl') &&
+    !larkRead.nodes.some((node) => node.name === 'HTTP search my tasks') &&
+    !JSON.stringify(larkRead).includes('/tasks/search'),
+  'lark_read_tools should use Feishu tasks.list instead of a nonexistent task search endpoint',
+);
 assert(
   larkReadTool.parameters.workflowId.value !== 'REPLACE_OAR_LARK_READ_TOOLS_ID',
   'lark_read_tools should reference a real workflow id',
@@ -1043,7 +1057,8 @@ console.log(
         patchStatus: patchFormatted[0].json.proposalStatus,
       },
       lark_read_tools: {
-        taskAssignee: listMyTasks[0].json.taskSearchBody.filter.assignee_ids[0],
+        taskListType: listMyTasks[0].json.taskListParams.type,
+        completedFilter: listMyTasks[0].json.taskListParams.completed,
         forgedTaskOwner: forgedTaskOwner[0].json.error.code,
         mentionedContact: mentionedContact[0].json.contactUserIds[0],
         forgedContact: forgedContact[0].json.error.code,
