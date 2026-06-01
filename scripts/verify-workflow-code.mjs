@@ -440,8 +440,8 @@ assert(
   'okr_tools query should be supplied by the model',
 );
 assert(
-  okrTool.parameters.workflowInputs.value.allowedChatId.includes('Prepare incoming message'),
-  'okr_tools allowedChatId should be bound from the current event',
+  okrTool.parameters.workflowInputs.value.allowedChatId.includes('$json.allowedChatId'),
+  'okr_tools allowedChatId should be bound from the current agent input item',
 );
 
 const okrWriteTool = oar.nodes.find((node) => node.name === 'okr_write_tools');
@@ -466,8 +466,8 @@ for (const field of [
   'trustedSessionKey',
 ]) {
   assert(
-    okrWriteTool.parameters.workflowInputs.value[field].includes('Prepare incoming message'),
-    `okr_write_tools ${field} should be bound from the current event`,
+    okrWriteTool.parameters.workflowInputs.value[field].includes('$json.'),
+    `okr_write_tools ${field} should be bound from the current agent input item`,
   );
 }
 
@@ -489,17 +489,18 @@ for (const field of [
   'trustedSessionKey',
 ]) {
   assert(
-    larkReadTool.parameters.workflowInputs.value[field].includes('Prepare incoming message'),
-    `lark_read_tools ${field} should be bound from the current event`,
+    larkReadTool.parameters.workflowInputs.value[field].includes('$json.'),
+    `lark_read_tools ${field} should be bound from the current agent input item`,
   );
 }
 assert(
-  larkReadTool.parameters.workflowInputs.value.allowedContactUserIdsJson.includes('mentionedUsers'),
+  larkReadTool.parameters.workflowInputs.value.allowedContactUserIdsJson.includes('$json.mentionedUsers'),
   'lark_read_tools should receive only injected mentioned contact ids',
 );
 assert(
   systemMessage.includes('飞书任务/通讯录读取工具：lark_read_tools') &&
-    systemMessage.includes('不要做姓名/邮箱/手机号模糊搜索'),
+    systemMessage.includes('不要做姓名/邮箱/手机号模糊搜索') &&
+    systemMessage.includes('intent=list_my_tasks 只是强提示'),
   'AI Agent should describe read-only task/contact privacy boundaries',
 );
 
@@ -818,6 +819,14 @@ const taskReadIntent = await run(prepareCode, {
 assert(
   taskReadIntent[0].json.intent === 'list_my_tasks',
   'prepare should detect list_my_tasks intent',
+);
+
+const okrReadWithMyText = await run(prepareCode, {
+  input: [larkTextEvent('读取下我的okr看看', 'om_okr_read')],
+});
+assert(
+  okrReadWithMyText[0].json.intent === 'read_okr',
+  'prepare should not let broad task wording override explicit OKR reads',
 );
 
 const contactEvent = larkTextEvent('查看张三的通讯录资料', 'om_contact');
