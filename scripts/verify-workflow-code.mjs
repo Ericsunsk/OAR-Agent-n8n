@@ -440,19 +440,40 @@ assert(
   'okr_tools query should be supplied by the model',
 );
 assert(
-  okrTool.parameters.workflowInputs.value.allowedChatId.includes('$json.allowedChatId'),
-  'okr_tools allowedChatId should be bound from the current agent input item',
+  okrTool.parameters.workflowInputs.value.allowedChatId.includes('$json.entities.chat.allowedChatId'),
+  'okr_tools allowedChatId should be bound from semantic entities',
 );
 
 const okrWriteTool = oar.nodes.find((node) => node.name === 'okr_write_tools');
 assert(okrWriteTool, 'okr_write_tools should be connected to the main agent');
 const aiAgent = oar.nodes.find((node) => node.name === 'AI Agent');
 const systemMessage = aiAgent?.parameters?.options?.systemMessage || '';
+const agentText = aiAgent?.parameters?.text || '';
 assert(
   systemMessage.includes('每次回复带 1-3 个贴合语义的 emoji') &&
     systemMessage.includes('少用符号和 Markdown') &&
     systemMessage.includes('默认 2-5 行'),
   'AI Agent should keep replies concise, low-symbol, and emoji-friendly',
+);
+assert(
+  systemMessage.includes('输入 JSON 只包含 message、intentHint、intentConfidence、signals 和 entities') &&
+    systemMessage.includes('entities.message.contextHints') &&
+    !systemMessage.includes('entities.message.entities.message.contextHints') &&
+    !systemMessage.includes('"entities.target.displayName"') &&
+    !systemMessage.includes('"entities.message.contextHints"'),
+  'AI Agent should describe the latest semantic packet without dotted JSON keys',
+);
+assert(
+  agentText.includes('$json.entities') &&
+    !agentText.includes('$json.chatId') &&
+    !agentText.includes('$json.sessionKey') &&
+    !agentText.includes('$json.text'),
+  'AI Agent input should use only the latest semantic packet',
+);
+const simpleMemory = oar.nodes.find((node) => node.name === 'Simple Memory');
+assert(
+  simpleMemory?.parameters?.sessionKey?.includes('$json.entities.sessionKey'),
+  'Simple Memory should use semantic entities.sessionKey',
 );
 assert(
   okrWriteTool.parameters.workflowInputs.value.query.includes('$fromAI'),
@@ -466,8 +487,9 @@ for (const field of [
   'trustedSessionKey',
 ]) {
   assert(
-    okrWriteTool.parameters.workflowInputs.value[field].includes('$json.'),
-    `okr_write_tools ${field} should be bound from the current agent input item`,
+    okrWriteTool.parameters.workflowInputs.value[field].includes('$json.entities') ||
+      okrWriteTool.parameters.workflowInputs.value[field].includes('$json.message'),
+    `okr_write_tools ${field} should be bound from semantic entities`,
   );
 }
 
@@ -489,18 +511,20 @@ for (const field of [
   'trustedSessionKey',
 ]) {
   assert(
-    larkReadTool.parameters.workflowInputs.value[field].includes('$json.'),
-    `lark_read_tools ${field} should be bound from the current agent input item`,
+    larkReadTool.parameters.workflowInputs.value[field].includes('$json.entities') ||
+      larkReadTool.parameters.workflowInputs.value[field].includes('$json.message'),
+    `lark_read_tools ${field} should be bound from semantic entities`,
   );
 }
 assert(
-  larkReadTool.parameters.workflowInputs.value.allowedContactUserIdsJson.includes('$json.mentionedUsers'),
-  'lark_read_tools should receive only injected mentioned contact ids',
+  larkReadTool.parameters.workflowInputs.value.allowedContactUserIdsJson.includes('$json.entities.mentions'),
+  'lark_read_tools should receive only injected mentioned contact ids from entities',
 );
 assert(
   systemMessage.includes('飞书任务/通讯录读取工具：lark_read_tools') &&
     systemMessage.includes('不要做姓名/邮箱/手机号模糊搜索') &&
-    systemMessage.includes('intent=list_my_tasks 只是强提示'),
+    systemMessage.includes('intentHint=list_my_tasks') &&
+    systemMessage.includes('OKR 时间管理大师'),
   'AI Agent should describe read-only task/contact privacy boundaries',
 );
 
@@ -801,8 +825,7 @@ const prepareCode = codeOf(oar, 'Prepare incoming message');
 function prepareOutput(result, label) {
   const output = result[0]?.json;
   assert(output, label + ' should produce a routed message');
-  assert(typeof output.intent === 'string' && output.intent, label + ' should retain legacy intent');
-  assert(output.contextHints && typeof output.contextHints === 'object', label + ' should retain contextHints');
+  assert(typeof output.message === 'string' && output.message, label + ' should expose message text');
   assert(typeof output.intentHint === 'string' && output.intentHint, label + ' should expose intentHint');
   assert(
     ['high', 'medium', 'low'].includes(output.intentConfidence),
@@ -816,14 +839,40 @@ function prepareOutput(result, label) {
     output.entities && typeof output.entities === 'object' && !Array.isArray(output.entities),
     label + ' should expose semantic entities',
   );
+  assert(output.entities.sender?.openId, label + ' should expose sender entity');
+  assert(output.entities.chat?.chatId, label + ' should expose chat entity');
+  assert(output.entities.message?.messageId, label + ' should expose message entity');
+  assert(
+    output.entities.message?.contextHints && typeof output.entities.message.contextHints === 'object',
+    label + ' should expose context hints inside entities',
+  );
+  for (const legacyField of [
+    'intent',
+    'text',
+    'contextHints',
+    'chatId',
+    'chatType',
+    'messageId',
+    'senderOpenId',
+    'sessionKey',
+    'targetUserId',
+    'targetUserIdType',
+    'targetDisplayName',
+    'targetSource',
+    'mentionedUsers',
+    'allowedChatId',
+    'chatDisplayName',
+  ]) {
+    assert(
+      output[legacyField] === undefined,
+      label + ' should not expose legacy top-level field ' + legacyField,
+    );
+  }
   return output;
 }
 
 function assertSemanticIntent(output, expected, label) {
-  assert(
-    output.intent === expected || output.intentHint === expected,
-    label + ' should route or hint ' + expected,
-  );
+  assert(output.intentHint === expected, label + ' should hint ' + expected);
 }
 
 function hasTruthySignal(output, pattern) {
@@ -919,7 +968,7 @@ assert(
   'contact read message should expose contact read semantics',
 );
 assert(
-  contactSemantic.mentionedUsers[0].openId === 'ou_2',
+  contactSemantic.entities.mentions[0].openId === 'ou_2',
   'prepare should expose mentioned users for contact read guards',
 );
 
@@ -938,8 +987,8 @@ const executeWriteIntent = await run(prepareCode, {
 const executeWriteSemantic = prepareOutput(executeWriteIntent, 'OKR write confirmation message');
 assert(
   executeWriteSemantic.intentHint === 'execute_okr_update' ||
-    executeWriteSemantic.intent === 'execute_okr_update',
-  'OKR write confirmation message should route or hint execute_okr_update',
+    executeWriteSemantic.signals.wantsOkrWriteConfirm === true,
+  'OKR write confirmation message should hint execute_okr_update',
 );
 
 const directChatGroup = await run(prepareCode, {
@@ -952,7 +1001,7 @@ assert(
   'private group OKR read message should expose group OKR semantics',
 );
 assert(
-  directChatGroupSemantic.allowedChatId === '',
+  directChatGroupSemantic.entities.chat.allowedChatId === '',
   'private chat should not authorize text-provided chat IDs',
 );
 
@@ -1001,52 +1050,43 @@ console.log(
       },
       semantic_routing: {
         analyze: {
-          intent: analyzeSemantic.intent,
           intentHint: analyzeSemantic.intentHint,
           okrDomain: analyzeSemantic.signals.okrDomain,
           wantsOkrAnalysis: analyzeSemantic.signals.wantsOkrAnalysis,
         },
         dispatch: {
-          intent: dispatchSemantic.intent,
           intentHint: dispatchSemantic.intentHint,
           wantsBotDispatch: dispatchSemantic.signals.wantsBotDispatch,
         },
         taskRead: {
-          intent: taskReadSemantic.intent,
           intentHint: taskReadSemantic.intentHint,
           wantsTaskRead: taskReadSemantic.signals.wantsTaskRead,
         },
         unfinishedTaskRead: {
-          intent: unfinishedTaskReadSemantic.intent,
           intentHint: unfinishedTaskReadSemantic.intentHint,
           wantsTaskRead: unfinishedTaskReadSemantic.signals.wantsTaskRead,
         },
         explicitOkrRead: {
-          intent: okrReadWithMyTextSemantic.intent,
           intentHint: okrReadWithMyTextSemantic.intentHint,
           okrDomain: okrReadWithMyTextSemantic.signals.okrDomain,
           wantsTaskRead: okrReadWithMyTextSemantic.signals.wantsTaskRead,
         },
         contextualOkrAnalysis: {
-          intent: contextualOkrAnalysisSemantic.intent,
           intentHint: contextualOkrAnalysisSemantic.intentHint,
           okrDomain: contextualOkrAnalysisSemantic.signals.okrDomain,
         },
         contactRead: {
-          intent: contactSemantic.intent,
           intentHint: contactSemantic.intentHint,
           wantsContactRead: contactSemantic.signals.wantsContactRead,
         },
         proposeWrite: {
-          intent: proposeWriteSemantic.intent,
           intentHint: proposeWriteSemantic.intentHint,
           wantsOkrWrite: proposeWriteSemantic.signals.wantsOkrWrite,
         },
         executeWrite: {
-          intent: executeWriteSemantic.intent,
           intentHint: executeWriteSemantic.intentHint,
         },
-        privateChatAllowedChatId: directChatGroupSemantic.allowedChatId,
+        privateChatAllowedChatId: directChatGroupSemantic.entities.chat.allowedChatId,
       },
     },
     null,
