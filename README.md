@@ -9,6 +9,8 @@ OAR 是一个运行在飞书群聊/私聊中的 OKR 助手，基于 n8n Workflow
 - 个人 OKR 风险分析（`analyze_okr`）
 - 团队 OKR 汇总（`summarize_group_okrs`）
 - 两段式修改自己的 Objective / KR（`propose_okr_update` -> `execute_okr_update`）
+- 读取自己负责的飞书任务（`list_my_tasks`）
+- 读取自己或当前消息里被 @ 用户的通讯录基础信息（`get_user_basic` / `get_mentioned_users`）
 - 读取会话引用上下文（被引用消息、话题串、近期聊天）
 - 通过白名单 registry 给其他机器人派发最小化任务（`dispatch_task`）
 
@@ -24,6 +26,8 @@ OAR 是一个运行在飞书群聊/私聊中的 OKR 助手，基于 n8n Workflow
   - 跨机器人任务派发工具子工作流（`bot_task_tools`）
 - `OAR_okr_write_tools.json`
   - 受控 OKR 写入工具子工作流（`okr_write_tools`）
+- `OAR_lark_read_tools.json`
+  - 飞书任务/通讯录只读工具子工作流（`lark_read_tools`）
 
 ## 前置条件
 
@@ -38,8 +42,11 @@ OAR 是一个运行在飞书群聊/私聊中的 OKR 助手，基于 n8n Workflow
 - 读取群成员权限（`im:chat.members:read`）
 - OKR 读取相关权限（OKR OpenAPI）
 - 若启用 OKR 修改能力，需要 OKR 写入权限（`okr:okr.content:writeonly`）
+- 若启用任务读取能力，需要任务读取权限（`task:task:read`）
+- 若启用通讯录读取能力，需要通讯录基础读取权限（如 `contact:user.base:readonly`、`contact:user.basic_profile:readonly`）
 
 如果某些接口报 403 或空数据，请先检查飞书应用权限与租户管理员授权状态。
+注意：线上 n8n 使用的是 n8n 凭证里的飞书应用配置；本地 `lark-cli` 的授权只用于本地调试，不能证明线上 n8n 凭证已有相同权限。
 
 ## 在 n8n 中导入
 
@@ -47,7 +54,8 @@ OAR 是一个运行在飞书群聊/私聊中的 OKR 助手，基于 n8n Workflow
 2. 再导入 `OAR_conversation_context_tools.json`
 3. 再导入 `OAR_bot_task_tools.json`
 4. 再导入 `OAR_okr_write_tools.json`
-5. 最后导入 `OAR.json`
+5. 再导入 `OAR_lark_read_tools.json`
+6. 最后导入 `OAR.json`
 
 说明：主工作流里的 `Tool Workflow` 节点会引用子工作流。若导入后引用丢失，请在节点中重新选择对应 workflow。
 
@@ -74,7 +82,7 @@ OKR 修改能力还依赖 n8n Data Table：
 
 1. 激活 `OAR` 主工作流
 2. 在飞书中给机器人发消息，或在群里 `@` 机器人并提问 OKR 相关问题
-3. 机器人将根据消息意图调用 `okr_tools` / `conversation_context_tools` / `bot_task_tools` 并返回结果
+3. 机器人将根据消息意图调用 `okr_tools` / `okr_write_tools` / `lark_read_tools` / `conversation_context_tools` / `bot_task_tools` 并返回结果
 
 ## 使用 n8n-cli 更新
 
@@ -87,6 +95,7 @@ n8n-cli workflow get YzwZbpxLpOren7HI --format=json > backups/<timestamp>/OAR_ok
 n8n-cli workflow get Ucyq29dR28usv42j --format=json > backups/<timestamp>/OAR_conversation_context_tools.online.json
 n8n-cli workflow get JdeFwwuDd1tUseOl --format=json > backups/<timestamp>/OAR_bot_task_tools.online.json
 n8n-cli workflow get Qiai5nF0ENxuWOgO --format=json > backups/<timestamp>/OAR_okr_write_tools.online.json
+n8n-cli workflow get NKiGjIo6ehm6QFVz --format=json > backups/<timestamp>/OAR_lark_read_tools.online.json
 ```
 
 线上 API 不接受导出 JSON 中的只读字段。部署前先生成精简 payload：
@@ -96,6 +105,7 @@ node scripts/verify-workflow-code.mjs
 node scripts/prepare-deploy.mjs
 n8n-cli workflow update YzwZbpxLpOren7HI --file .deploy/OAR_okr_tools.json
 n8n-cli workflow update Qiai5nF0ENxuWOgO --file .deploy/OAR_okr_write_tools.json
+n8n-cli workflow update NKiGjIo6ehm6QFVz --file .deploy/OAR_lark_read_tools.json
 n8n-cli workflow update NPmg6IV5BCjsBrDh --file .deploy/OAR.json
 ```
 
@@ -131,6 +141,19 @@ n8n-cli workflow update NPmg6IV5BCjsBrDh --file .deploy/OAR.json
   - 只有用户在同一会话精确回复 `确认 <proposalId>` 后才执行 PATCH。
   - 执行前会重新读取目标 OKR，若草案生成后内容、分数、截止日期或更新时间发生变化，会拒绝并要求重新生成草案。
   - proposal 状态存储在 n8n Data Table `oar_okr_write_proposals`。
+
+`lark_read_tools` 支持：
+
+- `list_my_tasks`
+  - 读取发消息人自己负责的飞书任务。
+  - `assignee_ids` 由父工作流注入的真实 sender open_id 固定生成；AI 或用户文本里传入的其他 `open_id/user_id/assignee` 会被拒绝。
+  - 支持可选的 `completed` 和 `query` 过滤。
+- `get_mentioned_users`
+  - 批量读取当前消息里被 @ 用户的通讯录基础信息。
+  - 允许读取的用户列表来自父工作流解析到的真实 mentions，不接受 AI 伪造。
+- `get_user_basic`
+  - 读取发消息人自己，或当前消息里被 @ 用户的基础信息。
+  - 默认不输出邮箱、手机号、工号、职级等敏感字段。
 
 `bot_task_tools` 支持：
 

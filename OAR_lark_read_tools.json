@@ -1,0 +1,350 @@
+{
+  "name": "OAR Lark Read Tools",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "query"
+            },
+            {
+              "name": "trustedSenderOpenId"
+            },
+            {
+              "name": "trustedMessageId"
+            },
+            {
+              "name": "trustedMessageText"
+            },
+            {
+              "name": "trustedChatId"
+            },
+            {
+              "name": "trustedSessionKey"
+            },
+            {
+              "name": "allowedContactUserIdsJson"
+            }
+          ]
+        }
+      },
+      "id": "1d06a1e0-b29b-4d3e-8ef2-2d83fb1a0b28",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const raw = $input.all()[0]?.json ?? {};\nlet payload = raw.query ?? {};\nlet parseError = false;\n\nif (typeof payload === 'string') {\n  try {\n    payload = JSON.parse(payload);\n  } catch (error) {\n    payload = {};\n    parseError = true;\n  }\n}\n\nif (!payload || typeof payload !== 'object' || Array.isArray(payload)) {\n  payload = {};\n  parseError = true;\n}\n\nfunction str(value) {\n  return String(value ?? '').trim();\n}\n\nfunction boolOrNull(value) {\n  if (value === undefined || value === null || value === '') return null;\n  if (typeof value === 'boolean') return value;\n  const text = str(value).toLowerCase();\n  if (['true', '1', 'yes', 'done', 'completed', '已完成', '完成'].includes(text)) return true;\n  if (['false', '0', 'no', 'todo', 'open', 'incomplete', '未完成', '待办'].includes(text)) return false;\n  return null;\n}\n\nfunction finish(ok, output, extra = {}, errorCode = 'LARK_READ_FAILED') {\n  return [{\n    json: {\n      ...extra,\n      ok,\n      action: extra.action || action || 'unknown_action',\n      version: 'v1',\n      error: ok ? null : { code: errorCode, message: output, retryable: false },\n      output,\n    },\n  }];\n}\n\nfunction parseAllowedMentions(value) {\n  let source = value;\n  if (typeof source === 'string') {\n    try {\n      source = JSON.parse(source || '[]');\n    } catch (error) {\n      source = [];\n    }\n  }\n  if (!Array.isArray(source)) return [];\n  const seen = new Set();\n  const users = [];\n  for (const item of source) {\n    const id = str(item.openId || item.open_id || item.id || item.userId || item.user_id);\n    if (!id || seen.has(id)) continue;\n    seen.add(id);\n    users.push({\n      openId: id,\n      name: str(item.name || item.displayName || item.localizedName),\n    });\n  }\n  return users.slice(0, 10);\n}\n\nconst trusted = {\n  senderOpenId: str(raw.trustedSenderOpenId),\n  messageId: str(raw.trustedMessageId),\n  messageText: str(raw.trustedMessageText),\n  chatId: str(raw.trustedChatId),\n  sessionKey: str(raw.trustedSessionKey),\n};\n\nlet action = str(payload.action || payload.operation || payload.tool);\nconst aliases = {\n  tasks: 'list_my_tasks',\n  my_tasks: 'list_my_tasks',\n  list_tasks: 'list_my_tasks',\n  list_my_task: 'list_my_tasks',\n  get_tasks: 'list_my_tasks',\n  mentioned_users: 'get_mentioned_users',\n  get_mentions: 'get_mentioned_users',\n  get_mentioned_contacts: 'get_mentioned_users',\n  contact_mentions: 'get_mentioned_users',\n  get_user: 'get_user_basic',\n  get_contact: 'get_user_basic',\n  lookup_contact: 'get_user_basic',\n  user_profile: 'get_user_basic',\n};\naction = aliases[action] || action;\n\nconst supportedActions = ['list_my_tasks', 'get_mentioned_users', 'get_user_basic'];\nif (!action && /任务|待办|todo|task/i.test(trusted.messageText)) action = 'list_my_tasks';\nif (!action && /通讯录|联系人|成员|用户|同事|user|contact/i.test(trusted.messageText)) action = 'get_mentioned_users';\n\nif (parseError) return finish(false, '读取工具参数不是有效 JSON。', { action: 'unknown_action' }, 'INVALID_TOOL_INPUT');\nif (!supportedActions.includes(action)) {\n  return finish(false, 'lark_read_tools 不支持 action：' + (action || 'unknown') + '。', {\n    action: action || 'unknown_action',\n    supportedActions,\n  }, 'UNSUPPORTED_ACTION');\n}\nif (!trusted.senderOpenId || !trusted.messageId || !trusted.sessionKey) {\n  return finish(false, '缺少可信消息上下文，不能读取飞书数据。', { action }, 'MISSING_TRUSTED_CONTEXT');\n}\n\nconst identityFields = ['targetUserId', 'target_user_id', 'assigneeId', 'assignee_id', 'open_id', 'openId', 'userId', 'user_id'];\nif (action === 'list_my_tasks') {\n  const supplied = identityFields.map((field) => str(payload[field])).find(Boolean);\n  if (supplied && supplied !== trusted.senderOpenId && supplied !== 'me') {\n    return finish(false, '第一版只允许读取你自己负责的任务。', { action }, 'READ_SELF_TASKS_ONLY');\n  }\n\n  const completed = boolOrNull(payload.completed ?? payload.complete ?? payload.done ?? payload.status);\n  const query = str(payload.query || payload.keyword || payload.text).slice(0, 100);\n  const pageToken = str(payload.pageToken || payload.page_token).slice(0, 200);\n  const filter = { assignee_ids: [trusted.senderOpenId] };\n  if (completed !== null) filter.is_completed = completed;\n  const taskSearchBody = { filter, query };\n  if (pageToken) taskSearchBody.page_token = pageToken;\n\n  return finish(true, '准备读取你负责的飞书任务。', {\n    action,\n    trusted,\n    taskSearchBody,\n    filters: { completed, query, pageToken },\n  });\n}\n\nconst allowedMentions = parseAllowedMentions(raw.allowedContactUserIdsJson || raw.allowedContactUserIds);\nconst allowedSet = new Set([trusted.senderOpenId, ...allowedMentions.map((user) => user.openId)]);\nlet contactUserIds = [];\n\nif (action === 'get_mentioned_users') {\n  contactUserIds = allowedMentions.map((user) => user.openId);\n  if (!contactUserIds.length) {\n    return finish(false, '这条消息里没有可读取的 @ 用户。', { action, allowedMentions }, 'NO_MENTIONED_USERS');\n  }\n} else {\n  let targetUserId = str(payload.targetUserId || payload.target_user_id || payload.userId || payload.user_id || payload.openId || payload.open_id || payload.id);\n  if (!targetUserId || targetUserId === 'me' || targetUserId === 'self') targetUserId = trusted.senderOpenId;\n  if (!allowedSet.has(targetUserId)) {\n    return finish(false, '第一版只允许读取你自己或当前消息里被 @ 的用户资料。', {\n      action,\n      targetUserId,\n      allowedMentions,\n    }, 'CONTACT_TARGET_NOT_ALLOWED');\n  }\n  contactUserIds = [targetUserId];\n}\n\nconst dedupedContactUserIds = [...new Set(contactUserIds)].slice(0, 10);\nreturn finish(true, '准备读取通讯录基础信息。', {\n  action,\n  trusted,\n  allowedMentions,\n  contactUserIds: dedupedContactUserIds,\n  contactSearchBody: {\n    filter: { user_ids: dedupedContactUserIds },\n  },\n  contactPageSize: Math.min(Math.max(dedupedContactUserIds.length || 1, 1), 10),\n});"
+      },
+      "id": "c9a4d7e2-ec6f-44ef-93cc-6a18bc108052",
+      "name": "Normalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -640,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.ok ? \"true\" : \"false\" }}",
+              "operation": "equal",
+              "value2": "true"
+            }
+          ]
+        }
+      },
+      "id": "b6d02ab2-b92b-4102-837c-353d224c1076",
+      "name": "Request valid",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -400,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.action }}",
+              "operation": "equal",
+              "value2": "list_my_tasks"
+            }
+          ]
+        }
+      },
+      "id": "5e1540ea-60dc-4de2-a87e-567f5865fd6b",
+      "name": "Action is list_my_tasks",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -160,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "larkApi",
+        "method": "POST",
+        "url": "https://open.feishu.cn/open-apis/task/v2/tasks/search",
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.taskSearchBody) }}"
+      },
+      "id": "73bb8e6f-d825-48b6-91bf-c09d21e63ce3",
+      "name": "HTTP search my tasks",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        80,
+        -220
+      ],
+      "credentials": {
+        "larkApi": {
+          "id": "OZYoOaN1QpJlcZma",
+          "name": "OKR Agent"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const input = $input.all()[0]?.json ?? {};\nconst request = $('Normalize').all()[0]?.json ?? {};\n\nfunction finish(ok, output, extra = {}, errorCode = 'LIST_MY_TASKS_FAILED') {\n  return [{\n    json: {\n      ...extra,\n      ok,\n      action: 'list_my_tasks',\n      version: 'v1',\n      error: ok ? null : { code: errorCode, message: output, retryable: false },\n      output,\n    },\n  }];\n}\n\nfunction asArray(value) {\n  return Array.isArray(value) ? value : [];\n}\n\nfunction firstString(...values) {\n  for (const value of values) {\n    if (value === undefined || value === null) continue;\n    const text = String(value).trim();\n    if (text) return text;\n  }\n  return '';\n}\n\nfunction formatTime(value) {\n  const raw = firstString(value?.timestamp, value);\n  if (!raw) return '';\n  const number = Number(raw);\n  if (!Number.isFinite(number)) return '';\n  try {\n    return new Intl.DateTimeFormat('zh-CN', {\n      timeZone: 'Asia/Shanghai',\n      year: 'numeric',\n      month: '2-digit',\n      day: '2-digit',\n      hour: '2-digit',\n      minute: '2-digit',\n      hour12: false,\n    }).format(new Date(number));\n  } catch (error) {\n    return '';\n  }\n}\n\nfunction taskFrom(item) {\n  return item?.task && typeof item.task === 'object' ? item.task : item;\n}\n\nif (!request.ok) return finish(false, request.output || '读取请求未通过校验。', request, request.error?.code || 'REQUEST_INVALID');\nif (input.error) {\n  const detail = typeof input.error === 'string' ? input.error : (input.error.message || JSON.stringify(input.error));\n  return finish(false, '读取飞书任务失败：' + detail, { data: { tasks: [] } }, 'READ_TASKS_FAILED');\n}\nif (input.code && input.code !== 0) {\n  return finish(false, '读取飞书任务失败：' + (input.msg || JSON.stringify(input)), { data: { tasks: [] } }, 'READ_TASKS_API_ERROR');\n}\n\nconst data = input.data && typeof input.data === 'object' ? input.data : input;\nconst rawItems = asArray(data.items || data.tasks || input.items || input.tasks);\nconst tasks = rawItems.map(taskFrom).filter(Boolean).slice(0, 10).map((task) => {\n  const guid = firstString(task.guid, task.task_guid, task.id);\n  const summary = firstString(task.summary, task.title, task.name, '(未命名任务)').slice(0, 120);\n  const status = firstString(task.status) || (task.completed_at ? 'done' : 'todo');\n  const dueText = formatTime(task.due);\n  const startText = formatTime(task.start);\n  const updatedAt = formatTime(task.updated_at);\n  return {\n    guid,\n    taskId: firstString(task.task_id, task.suite_entity_num),\n    summary,\n    status,\n    dueText,\n    startText,\n    updatedAt,\n    url: firstString(task.url),\n  };\n});\n\nconst hasMore = Boolean(data.has_more || data.hasMore);\nconst pageToken = firstString(data.page_token, data.pageToken);\n\nif (!tasks.length) {\n  return finish(true, '✅ 没有找到你负责的飞书任务。', {\n    data: { tasks, count: 0, hasMore, pageToken },\n  });\n}\n\nconst lines = ['✅ 找到 ' + tasks.length + ' 个你负责的任务' + (hasMore ? '，还有更多。' : '。')];\nfor (const [index, task] of tasks.slice(0, 5).entries()) {\n  const bits = [String(index + 1) + '. ' + task.summary];\n  if (task.status) bits.push(task.status === 'done' ? '已完成' : '未完成');\n  if (task.dueText) bits.push('截止 ' + task.dueText);\n  lines.push(bits.join(' · '));\n}\nif (hasMore && pageToken) lines.push('📌 还有更多结果，可继续读取下一页。');\n\nreturn finish(true, lines.join('\\n'), {\n  data: {\n    tasks,\n    count: tasks.length,\n    hasMore,\n    pageToken,\n    filters: request.filters || {},\n  },\n});"
+      },
+      "id": "96ac0d9f-8f69-42fc-865f-efb837f2c989",
+      "name": "Format task result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        320,
+        -220
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ [\"get_mentioned_users\", \"get_user_basic\"].includes($json.action) ? \"true\" : \"false\" }}",
+              "operation": "equal",
+              "value2": "true"
+            }
+          ]
+        }
+      },
+      "id": "27bef14f-1f82-4c4d-b553-187e086458d3",
+      "name": "Action is contact lookup",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        80,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "larkApi",
+        "method": "GET",
+        "url": "={{ 'https://open.feishu.cn/open-apis/contact/v3/users/' + encodeURIComponent($json.contactUserId) }}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "user_id_type",
+              "value": "open_id"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "e6f0210e-4485-4214-b80d-bc6f647d32dd",
+      "name": "HTTP get contact by allowed id",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        560,
+        -20
+      ],
+      "credentials": {
+        "larkApi": {
+          "id": "OZYoOaN1QpJlcZma",
+          "name": "OKR Agent"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const items = $input.all();\nconst request = $('Normalize').all()[0]?.json ?? {};\n\nfunction finish(ok, output, extra = {}, errorCode = 'READ_CONTACTS_FAILED') {\n  return [{\n    json: {\n      ...extra,\n      ok,\n      action: request.action || 'get_user_basic',\n      version: 'v1',\n      error: ok ? null : { code: errorCode, message: output, retryable: false },\n      output,\n    },\n  }];\n}\n\nfunction firstString(...values) {\n  for (const value of values) {\n    if (value === undefined || value === null) continue;\n    const text = String(value).trim();\n    if (text) return text;\n  }\n  return '';\n}\n\nfunction userFrom(input) {\n  return input?.data?.user || input?.user || input?.data || input;\n}\n\nif (!request.ok) return finish(false, request.output || '读取请求未通过校验。', request, request.error?.code || 'REQUEST_INVALID');\n\nconst apiErrors = [];\nconst users = [];\nfor (const item of items) {\n  const input = item?.json ?? {};\n  if (input.error) {\n    apiErrors.push(typeof input.error === 'string' ? input.error : (input.error.message || JSON.stringify(input.error)));\n    continue;\n  }\n  if (input.code && input.code !== 0) {\n    apiErrors.push(input.msg || JSON.stringify(input));\n    continue;\n  }\n  const user = userFrom(input);\n  const openId = firstString(user.open_id, user.openId, user.user_id, user.id, input.contactUserId);\n  const displayName = firstString(user.localized_name, user.name, user.en_name, user.nickname, openId);\n  const department = firstString(user.department, user.department_path, user.department_name);\n  if (openId || displayName) {\n    users.push({\n      openId,\n      displayName,\n      department,\n      isActivated: typeof user.is_activated === 'boolean' ? user.is_activated : null,\n      isCrossTenant: typeof user.is_cross_tenant === 'boolean' ? user.is_cross_tenant : null,\n    });\n  }\n}\n\nif (!users.length && apiErrors.length) {\n  return finish(false, '读取通讯录失败：' + apiErrors[0], { data: { users: [], errors: apiErrors.slice(0, 3) } }, 'READ_CONTACTS_API_ERROR');\n}\n\nif (!users.length) {\n  return finish(true, '⚠️ 没有读取到可展示的通讯录信息。', {\n    data: { users, count: 0 },\n  });\n}\n\nconst lines = ['✅ 读取到 ' + users.length + ' 个用户基础信息。'];\nfor (const user of users.slice(0, 5)) {\n  const bits = [user.displayName];\n  if (user.department) bits.push(user.department);\n  if (user.isActivated === false) bits.push('未激活');\n  if (user.isCrossTenant === true) bits.push('外部联系人');\n  lines.push(bits.join(' · '));\n}\n\nreturn finish(true, lines.join('\\n'), {\n  data: { users, count: users.length, partialErrors: apiErrors.slice(0, 3) },\n});"
+      },
+      "id": "dcfaec83-8bfc-4180-a527-dd8b58572b29",
+      "name": "Format contact result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const request = $('Normalize').all()[0]?.json ?? {};\nreturn [{\n  json: {\n    ok: false,\n    action: request.action || 'unknown_action',\n    version: 'v1',\n    error: request.error || {\n      code: 'LARK_READ_GUARD_FAILED',\n      message: request.output || '读取请求未通过校验。',\n      retryable: false,\n    },\n    supportedActions: request.supportedActions || ['list_my_tasks', 'get_mentioned_users', 'get_user_basic'],\n    output: request.output || '读取请求未通过校验。',\n  },\n}];"
+      },
+      "id": "ac575b6a-ad82-4f66-b94a-713cbb7afc81",
+      "name": "Format guard failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -160,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const request = $('Normalize').all()[0]?.json ?? {};\nif (!request.ok) return [{ json: request }];\nconst ids = Array.isArray(request.contactUserIds) ? request.contactUserIds : [];\nreturn ids.map((contactUserId) => ({\n  json: {\n    ...request,\n    contactUserId,\n  },\n}));"
+      },
+      "id": "bb155aa5-32c4-47a6-9a2f-1ce3f6c8cc1d",
+      "name": "Expand contact ids",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        320,
+        -20
+      ]
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize": {
+      "main": [
+        [
+          {
+            "node": "Request valid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Request valid": {
+      "main": [
+        [
+          {
+            "node": "Action is list_my_tasks",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format guard failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Action is list_my_tasks": {
+      "main": [
+        [
+          {
+            "node": "HTTP search my tasks",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Action is contact lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP search my tasks": {
+      "main": [
+        [
+          {
+            "node": "Format task result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Action is contact lookup": {
+      "main": [
+        [
+          {
+            "node": "Expand contact ids",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format guard failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand contact ids": {
+      "main": [
+        [
+          {
+            "node": "HTTP get contact by allowed id",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP get contact by allowed id": {
+      "main": [
+        [
+          {
+            "node": "Format contact result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

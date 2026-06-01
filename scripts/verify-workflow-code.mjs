@@ -42,6 +42,7 @@ const okr = readWorkflow('OAR_okr_tools.json');
 const bot = readWorkflow('OAR_bot_task_tools.json');
 const oar = readWorkflow('OAR.json');
 const okrWrite = readWorkflow('OAR_okr_write_tools.json');
+const larkRead = readWorkflow('OAR_lark_read_tools.json');
 
 const readResult = await run(codeOf(okr, 'Format OKR result'), {
   input: [
@@ -230,6 +231,138 @@ assert(
   'oversized bot task text should be marked as truncated',
 );
 
+const larkReadNormalizeCode = codeOf(larkRead, 'Normalize');
+const larkReadTrustedInput = {
+  trustedSenderOpenId: 'ou_1',
+  trustedMessageId: 'om_read',
+  trustedMessageText: '查看我的任务',
+  trustedChatId: 'oc_current',
+  trustedSessionKey: 'oar:chat:oc_current:user:ou_1',
+  allowedContactUserIdsJson: JSON.stringify([{ openId: 'ou_2', name: '张三' }]),
+};
+const listMyTasks = await run(larkReadNormalizeCode, {
+  input: [
+    {
+      json: {
+        ...larkReadTrustedInput,
+        query: JSON.stringify({
+          action: 'list_my_tasks',
+          completed: false,
+          query: 'OKR',
+        }),
+      },
+    },
+  ],
+});
+assert(
+  listMyTasks[0].json.taskSearchBody.filter.assignee_ids[0] === 'ou_1',
+  'list_my_tasks should bind assignee to trusted sender',
+);
+assert(
+  listMyTasks[0].json.taskSearchBody.filter.is_completed === false,
+  'list_my_tasks should support completion filtering',
+);
+
+const forgedTaskOwner = await run(larkReadNormalizeCode, {
+  input: [
+    {
+      json: {
+        ...larkReadTrustedInput,
+        query: JSON.stringify({
+          action: 'list_my_tasks',
+          targetUserId: 'ou_other',
+        }),
+      },
+    },
+  ],
+});
+assert(
+  forgedTaskOwner[0].json.error.code === 'READ_SELF_TASKS_ONLY',
+  'list_my_tasks should reject AI-supplied assignee ids',
+);
+
+const taskFormatted = await run(codeOf(larkRead, 'Format task result'), {
+  input: [
+    {
+      json: {
+        data: {
+          items: [
+            {
+              guid: 'task-guid-1',
+              summary: '跟进 OKR 风险',
+              status: 'todo',
+              due: { timestamp: '1780243200000' },
+              url: 'https://applink.feishu.cn/client/todo/detail?guid=task-guid-1',
+            },
+          ],
+          has_more: true,
+          page_token: 'pt_next',
+        },
+      },
+    },
+  ],
+  nodes: { Normalize: listMyTasks },
+});
+assert(taskFormatted[0].json.ok === true, 'Format task result should succeed');
+assert(
+  taskFormatted[0].json.data.tasks[0].guid === 'task-guid-1',
+  'Format task result should keep task guid',
+);
+
+const mentionedContact = await run(larkReadNormalizeCode, {
+  input: [
+    {
+      json: {
+        ...larkReadTrustedInput,
+        query: JSON.stringify({ action: 'get_mentioned_users' }),
+      },
+    },
+  ],
+});
+assert(
+  mentionedContact[0].json.contactUserIds[0] === 'ou_2',
+  'get_mentioned_users should read only injected mentioned users',
+);
+
+const forgedContact = await run(larkReadNormalizeCode, {
+  input: [
+    {
+      json: {
+        ...larkReadTrustedInput,
+        query: JSON.stringify({ action: 'get_user_basic', targetUserId: 'ou_3' }),
+      },
+    },
+  ],
+});
+assert(
+  forgedContact[0].json.error.code === 'CONTACT_TARGET_NOT_ALLOWED',
+  'get_user_basic should reject non-sender non-mentioned users',
+);
+
+const contactFormatted = await run(codeOf(larkRead, 'Format contact result'), {
+  input: [
+    {
+      json: {
+        data: {
+          user: {
+            open_id: 'ou_2',
+            localized_name: '张三',
+            department: '产品部',
+            is_activated: true,
+            email: 'should-not-leak@example.com',
+          },
+        },
+      },
+    },
+  ],
+  nodes: { Normalize: mentionedContact },
+});
+assert(contactFormatted[0].json.ok === true, 'Format contact result should succeed');
+assert(
+  contactFormatted[0].json.data.users[0].email === undefined,
+  'Format contact result should not expose email by default',
+);
+
 const normalizeCode = codeOf(okr, 'Normalize');
 const directChatId = await run(normalizeCode, {
   input: [
@@ -337,6 +470,38 @@ for (const field of [
     `okr_write_tools ${field} should be bound from the current event`,
   );
 }
+
+const larkReadTool = oar.nodes.find((node) => node.name === 'lark_read_tools');
+assert(larkReadTool, 'lark_read_tools should be connected to the main agent');
+assert(
+  larkReadTool.parameters.workflowId.value !== 'REPLACE_OAR_LARK_READ_TOOLS_ID',
+  'lark_read_tools should reference a real workflow id',
+);
+assert(
+  larkReadTool.parameters.workflowInputs.value.query.includes('$fromAI'),
+  'lark_read_tools query should be supplied by the model',
+);
+for (const field of [
+  'trustedSenderOpenId',
+  'trustedMessageId',
+  'trustedMessageText',
+  'trustedChatId',
+  'trustedSessionKey',
+]) {
+  assert(
+    larkReadTool.parameters.workflowInputs.value[field].includes('Prepare incoming message'),
+    `lark_read_tools ${field} should be bound from the current event`,
+  );
+}
+assert(
+  larkReadTool.parameters.workflowInputs.value.allowedContactUserIdsJson.includes('mentionedUsers'),
+  'lark_read_tools should receive only injected mentioned contact ids',
+);
+assert(
+  systemMessage.includes('飞书任务/通讯录读取工具：lark_read_tools') &&
+    systemMessage.includes('不要做姓名/邮箱/手机号模糊搜索'),
+  'AI Agent should describe read-only task/contact privacy boundaries',
+);
 
 const writeNormalizeCode = codeOf(okrWrite, 'Normalize');
 const writeTrustedInput = {
@@ -647,6 +812,30 @@ assert(
   'prepare should detect dispatch_bot_task intent',
 );
 
+const taskReadIntent = await run(prepareCode, {
+  input: [larkTextEvent('查看我的待办任务', 'om_task')],
+});
+assert(
+  taskReadIntent[0].json.intent === 'list_my_tasks',
+  'prepare should detect list_my_tasks intent',
+);
+
+const contactEvent = larkTextEvent('查看张三的通讯录资料', 'om_contact');
+contactEvent.json.event.message.mentions = [
+  { id: { open_id: 'ou_2' }, name: '张三' },
+];
+const contactIntent = await run(prepareCode, {
+  input: [contactEvent],
+});
+assert(
+  contactIntent[0].json.intent === 'get_mentioned_users',
+  'prepare should detect contact read intent',
+);
+assert(
+  contactIntent[0].json.mentionedUsers[0].openId === 'ou_2',
+  'prepare should expose mentioned users for contact read guards',
+);
+
 const proposeWriteIntent = await run(prepareCode, {
   input: [larkTextEvent('把我的 OKR 分数改成 80%', 'om_4')],
 });
@@ -712,9 +901,17 @@ console.log(
         drift: driftDetected[0].json.error.code,
         patchStatus: patchFormatted[0].json.proposalStatus,
       },
+      lark_read_tools: {
+        taskAssignee: listMyTasks[0].json.taskSearchBody.filter.assignee_ids[0],
+        forgedTaskOwner: forgedTaskOwner[0].json.error.code,
+        mentionedContact: mentionedContact[0].json.contactUserIds[0],
+        forgedContact: forgedContact[0].json.error.code,
+      },
       intents: {
         analyze: analyzeIntent[0].json.intent,
         dispatch: dispatchIntent[0].json.intent,
+        taskRead: taskReadIntent[0].json.intent,
+        contactRead: contactIntent[0].json.intent,
         proposeWrite: proposeWriteIntent[0].json.intent,
         executeWrite: executeWriteIntent[0].json.intent,
         privateChatAllowedChatId: directChatGroup[0].json.allowedChatId,
